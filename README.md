@@ -30,14 +30,12 @@ npm run test:e2e
 | `NODE_ENV` | `production` |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 | `STORAGE_DIR` | `/data` |
-| `JWT_SECRET` | clave aleatoria de 48+ caracteres |
-| `BIOMETRIC_WEBHOOK_TOKEN` | token aleatorio de 48 caracteres |
-| `CORS_ORIGIN` | URL de Vercel, ej. `https://merkgustogym.vercel.app` |
+| `CORS_ORIGIN` | URL de Vercel, ej. `https://merkgustogym.vercel.app` (acepta comodín `https://*.vercel.app`) |
 | `DUENO_PASSWORD` | clave inicial del dueño (cámbiala luego) |
 | `BIOMETRIC_MODE` | `mock` mientras el lector no esté conectado |
 | `TZ` | `America/Caracas` |
 
-Railway define `PORT` solo. Las migraciones de `/database` se aplican en cada arranque.
+`JWT_SECRET` y `BIOMETRIC_WEBHOOK_TOKEN` son opcionales: si faltan se generan una vez y quedan en `STORAGE_DIR/secretos.json` (por eso el volumen). Railway define `PORT` solo. Las migraciones de `/database` se aplican en cada arranque.
 
 > **Lector Hikvision en la nube:** el lector está en la red del gimnasio. Railway no puede entrar a él (ISAPI); para el acceso facial real se usa la instalación local en el gimnasio.
 

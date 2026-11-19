@@ -41,7 +41,11 @@ export function createApp() {
   // ── Webhook del lector: ANTES de CORS/JSON, tiene su propia seguridad ──
   api.use('/biometric', express.json({ limit: '512kb' }), biometricWebhookRouter);
 
-  const origins = env.CORS_ORIGIN.split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+  // CORS_ORIGIN acepta varias URLs separadas por coma y comodines (https://*.vercel.app)
+  const origins = env.CORS_ORIGIN.split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean)
+    .map((o) => (o.includes('*') ? new RegExp('^' + o.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[a-z0-9-]+') + '$', 'i') : o));
   api.use(cors({ origin: origins }));
   // Fotos de rostro (≤200 KB) y comprobantes/soportes (≤4 MB) en base64
   api.use(express.json({ limit: '7mb' }));

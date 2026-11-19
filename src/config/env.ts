@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -40,7 +42,8 @@ const schema = z.object({
   DB_PASSWORD: z.string().default(''),
 
   // ── Seguridad ──
-  JWT_SECRET: z.string().min(32, 'JWT_SECRET debe tener al menos 32 caracteres'),
+  // Vacío = se genera una vez y se guarda en STORAGE_DIR/secretos.json
+  JWT_SECRET: z.union([z.literal(''), z.string().min(32, 'JWT_SECRET debe tener al menos 32 caracteres')]).default(''),
   JWT_EXPIRES_IN: z.string().default('12h'),
   DUENO_NOMBRE: z.string().default('Dueño Merkgusto'),
   DUENO_USUARIO: z.string().default('dueno'),
@@ -86,7 +89,8 @@ const schema = z.object({
   HIKVISION_BREAKER_THRESHOLD: z.coerce.number().int().positive().default(4),
   HIKVISION_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(30000),
   // Webhook (Listening Host) — el lector hace POST a /api/biometric/events/<token>
-  BIOMETRIC_WEBHOOK_TOKEN: z.string().min(24, 'BIOMETRIC_WEBHOOK_TOKEN debe tener al menos 24 caracteres'),
+  // Vacío = se genera solo (no hace falta mientras no haya lector)
+  BIOMETRIC_WEBHOOK_TOKEN: z.union([z.literal(''), z.string().min(24, 'BIOMETRIC_WEBHOOK_TOKEN debe tener al menos 24 caracteres')]).default(''),
   BIOMETRIC_ALLOWED_IPS: csv,
   BIOMETRIC_DEVICE_MACS: csv,
   BIOMETRIC_DEVICE_IPS: csv,
@@ -107,3 +111,24 @@ export const isProd = env.NODE_ENV === 'production';
 
 /** Carpeta raíz de datos del servidor (backend/storage por defecto). */
 export const STORAGE_DIR = path.resolve(env.STORAGE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../storage'));
+
+// ── Secretos que faltan: se generan una sola vez y se guardan en el disco del servidor ──
+{
+  const faltan = (['JWT_SECRET', 'BIOMETRIC_WEBHOOK_TOKEN'] as const).filter((k) => !env[k]);
+  if (faltan.length) {
+    const archivo = path.join(STORAGE_DIR, 'secretos.json');
+    let guardados: Record<string, string> = {};
+    try {
+      guardados = JSON.parse(fs.readFileSync(archivo, 'utf8'));
+    } catch {
+      /* primera vez */
+    }
+    for (const k of faltan) {
+      guardados[k] ||= crypto.randomBytes(32).toString('hex');
+      env[k] = guardados[k]!;
+    }
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    fs.writeFileSync(archivo, JSON.stringify(guardados, null, 2), { mode: 0o600 });
+    console.log(`   ✓ Secretos        ${faltan.join(', ')} generados en ${archivo}`);
+  }
+}
