@@ -9,6 +9,7 @@ import { gestionCaja, usuarioActual } from '../../middleware/auth.js';
 import { encolarEntrenador } from '../biometric/biometric-sync.service.js';
 import { FACE_MAX_BYTES } from '../biometric/dto/access-control.dto.js';
 import { marcar, reportePeriodo, solicitarPermiso, tableroHoy, verificarPin } from './entrenadores.service.js';
+import { anularPago, historialPagos, nomina, registrarPago } from './nomina.service.js';
 
 export const entrenadoresRouter = Router();
 
@@ -92,7 +93,7 @@ admin.get(
     res.json(
       await db
         .selectFrom('entrenadores')
-        .select(['id', 'codigo', 'nombre', 'apellido', 'cedula', 'telefono', 'especialidad', 'horario', 'activo', 'bioEstado', 'bioError', 'creadoEn', sql<boolean>`foto is not null`.as('tieneFoto')])
+        .select(['id', 'codigo', 'nombre', 'apellido', 'cedula', 'telefono', 'especialidad', 'horario', 'activo', 'bioEstado', 'bioError', 'creadoEn', 'pagoTipo', 'pagoTarifa', 'pagoMoneda', sql<boolean>`foto is not null`.as('tieneFoto')])
         .orderBy('activo', 'desc')
         .orderBy('nombre')
         .execute(),
@@ -109,6 +110,10 @@ const entrenadorSchema = z.object({
   horario: horarioSchema.default({}),
   foto: fotoRostro.nullish(),
   activo: z.boolean().default(true),
+  /** Cómo se le paga: monto fijo por periodo, por hora marcada o por clase dictada */
+  pagoTipo: z.enum(['ninguno', 'fijo', 'por_hora', 'por_clase']).optional(),
+  pagoTarifa: z.number().min(0).max(1e12).optional(),
+  pagoMoneda: z.enum(['USD', 'VES', 'COP']).optional(),
 });
 
 admin.post(
@@ -127,6 +132,9 @@ admin.post(
         foto: b.foto ?? null,
         bioEstado: b.foto ? 'pendiente' : 'sin_rostro',
         pinHash: await bcrypt.hash(b.pin, 10),
+        ...(b.pagoTipo && { pagoTipo: b.pagoTipo }),
+        ...(b.pagoTarifa !== undefined && { pagoTarifa: b.pagoTarifa }),
+        ...(b.pagoMoneda && { pagoMoneda: b.pagoMoneda }),
       })
       .returning(['id', 'codigo', 'nombre'])
       .executeTakeFirstOrThrow();
@@ -280,6 +288,52 @@ admin.get(
     const f = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
     const q = parse(z.object({ desde: f, hasta: f }), req.query);
     res.json(await reportePeriodo(q.desde, q.hasta));
+  }),
+);
+
+// ── Pagos (nómina de entrenadores) ──
+const fechaQ = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+admin.get(
+  '/nomina',
+  ah(async (req, res) => {
+    const q = parse(z.object({ desde: fechaQ, hasta: fechaQ }), req.query);
+    res.json(await nomina(q.desde, q.hasta));
+  }),
+);
+
+admin.get(
+  '/pagos',
+  ah(async (req, res) => {
+    const q = parse(z.object({ entrenadorId: z.string().uuid().optional(), desde: fechaQ.optional(), hasta: fechaQ.optional() }), req.query);
+    res.json(await historialPagos(q));
+  }),
+);
+
+admin.post(
+  '/pagos',
+  ah(async (req, res) => {
+    const b = parse(
+      z.object({
+        entrenadorId: z.string().uuid(),
+        desde: fechaQ,
+        hasta: fechaQ,
+        bonos: z.number().min(0).max(1e12).default(0),
+        descuentos: z.number().min(0).max(1e12).default(0),
+        metodo: z.string().max(20),
+        nota: z.string().trim().max(300).nullish(),
+      }),
+      req.body,
+    );
+    res.status(201).json(await registrarPago(usuarioActual(req).id, b));
+  }),
+);
+
+admin.post(
+  '/pagos/:id/anular',
+  ah(async (req, res) => {
+    const { motivo } = parse(z.object({ motivo: z.string().trim().min(4, 'Escribe el motivo').max(200) }), req.body);
+    res.json(await anularPago(Number(req.params.id), usuarioActual(req).id, motivo));
   }),
 );
 

@@ -14,6 +14,7 @@ import { convertir, MONEDA_REF, MONEDAS, redondear, type Tasas } from '../../lib
 import { listarMovimientos } from '../caja/caja.routes.js';
 import { resumenTurnos } from '../caja/caja.service.js';
 import { resumenDia } from '../dashboard/resumen.service.js';
+import { CATEGORIA_COMPRAS } from '../inventario/inventario.service.js';
 import { getTasas } from '../tasas/tasas.service.js';
 
 export const finanzasRouter = Router();
@@ -112,6 +113,8 @@ finanzasRouter.get(
     );
     const otrosIngresos = r(categorias.filter((c) => c.tipo === 'ingreso').reduce((s, c) => s + Number(c.montoRef), 0));
     const egresos = r(categorias.filter((c) => c.tipo === 'egreso').reduce((s, c) => s + Number(c.montoRef), 0));
+    // Comprar mercancía no es gasto: es inventario. Entra a la utilidad como costo cuando se vende.
+    const comprasInventario = r(categorias.filter((c) => c.tipo === 'egreso' && c.categoria === CATEGORIA_COMPRAS).reduce((s, c) => s + Number(c.montoRef), 0));
     const cobrado = r(ventas.cobrado);
 
     // Flujo neto real por moneda: ventas + ingresos − egresos
@@ -137,7 +140,8 @@ finanzasRouter.get(
         otrosIngresos,
         egresos,
         costoVendido,
-        utilidad: r(cobrado + otrosIngresos - egresos - costoVendido),
+        comprasInventario,
+        utilidad: r(cobrado + otrosIngresos - (egresos - comprasInventario) - costoVendido),
         operaciones: Number(ventas.n),
       },
       flujo,

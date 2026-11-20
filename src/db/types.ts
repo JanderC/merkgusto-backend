@@ -43,6 +43,8 @@ export interface SociosTable {
   bioError: string | null;
   creadoEn: Generated<Date>;
   actualizadoEn: Generated<Date>;
+  portalTokenHash: ColumnType<string | null, string | null | undefined, string | null>;
+  portalCreadoEn: TimestampNull;
 }
 
 export interface PlanesTable {
@@ -258,7 +260,12 @@ export interface EntrenadoresTable {
   bioEstado: Generated<BioEstado>;
   bioError: string | null;
   creadoEn: Generated<Date>;
+  pagoTipo: Generated<PagoTipo>;
+  pagoTarifa: ColumnType<number, number | string | undefined, number | string>;
+  pagoMoneda: Generated<Moneda>;
 }
+
+export type PagoTipo = 'ninguno' | 'fijo' | 'por_hora' | 'por_clase';
 
 export type TipoMarcacion = 'entrada' | 'salida' | 'retiro' | 'regreso';
 
@@ -415,6 +422,156 @@ export interface DevolucionItemsTable {
   subtotal: Num;
 }
 
+export interface ProveedoresTable {
+  id: Generated<number>;
+  nombre: string;
+  documento: string | null;
+  telefono: string | null;
+  contacto: string | null;
+  notas: string | null;
+  activo: Generated<boolean>;
+  creadoEn: Generated<Date>;
+}
+
+export type EstadoCompra = 'pagada' | 'pendiente' | 'anulada';
+
+export interface ComprasTable {
+  id: Generated<number>;
+  proveedorId: number | null;
+  factura: string | null;
+  fecha: ColumnType<string, string | undefined, string>;
+  moneda: Moneda;
+  total: Num;
+  totalRef: Num;
+  saldo: ColumnType<number, number | string | undefined, number | string>;
+  tasas: JsonNull;
+  estado: Generated<EstadoCompra>;
+  nota: string | null;
+  soporteId: number | null;
+  registradoPor: string;
+  creadoEn: Generated<Date>;
+  anuladaPor: string | null;
+  anuladaEn: TimestampNull;
+  motivoAnulacion: string | null;
+}
+
+export interface CompraItemsTable {
+  id: Generated<number>;
+  compraId: number;
+  productoId: number;
+  cantidad: number;
+  costoUnitario: Num;
+  subtotal: Num;
+}
+
+export interface CompraPagosTable {
+  id: Generated<number>;
+  compraId: number;
+  movimientoId: number | null;
+  metodo: string;
+  moneda: Moneda;
+  monto: Num;
+  registradoPor: string;
+  creadoEn: Generated<Date>;
+}
+
+export type TipoMovInventario = 'venta' | 'anulacion' | 'devolucion' | 'compra' | 'compra_anulada' | 'ajuste' | 'conteo';
+
+export interface InventarioMovimientosTable {
+  id: Generated<number>;
+  productoId: number;
+  tipo: TipoMovInventario;
+  cantidad: number;
+  stockResultante: number | null;
+  referencia: string | null;
+  usuarioId: string | null;
+  creadoEn: Generated<Date>;
+}
+
+export interface ConteosTable {
+  id: Generated<number>;
+  estado: Generated<'abierto' | 'cerrado' | 'cancelado'>;
+  nota: string | null;
+  creadoPor: string;
+  creadoEn: Generated<Date>;
+  cerradoPor: string | null;
+  cerradoEn: TimestampNull;
+  faltanteRef: ColumnType<number, number | string | undefined, number | string>;
+  sobranteRef: ColumnType<number, number | string | undefined, number | string>;
+}
+
+export interface ConteoItemsTable {
+  id: Generated<number>;
+  conteoId: number;
+  productoId: number;
+  contado: number;
+  esperado: number | null;
+  diferencia: number | null;
+  costo: ColumnType<number | null, number | string | null | undefined, number | string | null>;
+  moneda: Moneda | null;
+  contadoPor: string | null;
+  actualizadoEn: Timestamp;
+}
+
+export interface EntrenadorPagosTable {
+  id: Generated<number>;
+  entrenadorId: string;
+  desde: string;
+  hasta: string;
+  pagoTipo: PagoTipo;
+  tarifa: Num;
+  horas: Num;
+  clases: number;
+  montoBase: Num;
+  bonos: Num;
+  descuentos: Num;
+  total: Num;
+  moneda: Moneda;
+  metodo: string;
+  movimientoId: number | null;
+  nota: string | null;
+  registradoPor: string;
+  creadoEn: Generated<Date>;
+  anulado: Generated<boolean>;
+}
+
+type NumNull = ColumnType<number | null, number | string | null | undefined, number | string | null>;
+
+export interface SocioMedicionesTable {
+  id: Generated<number>;
+  socioId: string;
+  fecha: ColumnType<string, string | undefined, string>;
+  peso: NumNull;
+  grasa: NumNull;
+  musculo: NumNull;
+  cintura: NumNull;
+  cadera: NumNull;
+  pecho: NumNull;
+  brazo: NumNull;
+  pierna: NumNull;
+  nota: string | null;
+  registradoPor: string | null;
+  creadoEn: Generated<Date>;
+}
+
+export interface DiaRutina {
+  nombre: string;
+  ejercicios: Array<{ nombre: string; series: string; reps: string; nota: string }>;
+}
+
+export interface SocioRutinasTable {
+  id: Generated<number>;
+  socioId: string;
+  titulo: string;
+  objetivo: string | null;
+  dias: ColumnType<DiaRutina[], string | undefined, string>;
+  entrenadorId: string | null;
+  activa: Generated<boolean>;
+  creadoPor: string | null;
+  creadoEn: Generated<Date>;
+  actualizadoEn: Timestamp;
+}
+
 export interface DB {
   usuarios: UsuariosTable;
   socios: SociosTable;
@@ -444,4 +601,14 @@ export interface DB {
   auditoria: AuditoriaTable;
   devoluciones: DevolucionesTable;
   devolucionItems: DevolucionItemsTable;
+  proveedores: ProveedoresTable;
+  compras: ComprasTable;
+  compraItems: CompraItemsTable;
+  compraPagos: CompraPagosTable;
+  inventarioMovimientos: InventarioMovimientosTable;
+  conteos: ConteosTable;
+  conteoItems: ConteoItemsTable;
+  entrenadorPagos: EntrenadorPagosTable;
+  socioMediciones: SocioMedicionesTable;
+  socioRutinas: SocioRutinasTable;
 }

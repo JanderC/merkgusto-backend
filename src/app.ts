@@ -13,6 +13,7 @@ import { gestionCaja, requireAuth, soloDueno } from './middleware/auth.js';
 import { verArchivo } from './modules/archivos/archivos.routes.js';
 import { entrenadorFotoHandler, entrenadoresRouter } from './modules/entrenadores/entrenadores.routes.js';
 import { finanzasRouter } from './modules/finanzas/finanzas.routes.js';
+import { inventarioRouter } from './modules/inventario/inventario.routes.js';
 import { tasasRouter } from './modules/tasas/tasas.routes.js';
 import { asistenciaRouter } from './modules/asistencia/asistencia.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
@@ -23,7 +24,9 @@ import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { planesRouter, productosRouter } from './modules/planes/planes.routes.js';
 import { clasesRouter } from './modules/clases/clases.routes.js';
 import { membresiasRouter } from './modules/membresias/membresias.routes.js';
+import { portalRouter, progresoRouter } from './modules/socios/progreso.routes.js';
 import { socioFotoHandler, sociosRouter } from './modules/socios/socios.routes.js';
+import { respaldosRouter } from './modules/respaldos/respaldos.routes.js';
 import { usuariosRouter } from './modules/usuarios/usuarios.routes.js';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes.js';
 
@@ -33,6 +36,8 @@ const FRONTEND_DIST = path.resolve(here, '../../frontend/dist');
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  // Detrás del proxy de Railway / Vercel: la IP real del visitante (límites del portal)
+  app.set('trust proxy', 1);
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(compression());
 
@@ -55,6 +60,8 @@ export function createApp() {
   });
 
   api.use('/auth', authRouter);
+  // Portal del cliente: enlace personal, sin sesión (solo lectura)
+  api.use('/portal', portalRouter);
 
   // <img src> no puede enviar cabeceras: la foto acepta el token por query
   api.get('/socios/:id/foto', (req, _res, next) => {
@@ -83,6 +90,7 @@ export function createApp() {
   api.use('/entrenadores', entrenadoresRouter);
   api.use('/config', configRouter);
   api.use('/pos', posRouter);
+  api.use('/socios', progresoRouter);
   api.use('/socios', sociosRouter);
   api.use('/membresias', membresiasRouter);
   api.use('/clases', clasesRouter);
@@ -94,11 +102,13 @@ export function createApp() {
   api.use('/caja', gestionCaja, cajaDuenoRouter);
   api.use('/dashboard', gestionCaja, dashboardRouter);
   api.use('/finanzas', gestionCaja, finanzasRouter);
+  api.use('/inventario', gestionCaja, inventarioRouter);
 
   // ── Solo dueño: equipo e integraciones ──
   api.use('/usuarios', soloDueno, usuariosRouter);
   api.use('/whatsapp', soloDueno, whatsappRouter);
   api.use('/biometric', soloDueno, biometricAdminRouter);
+  api.use('/respaldos', soloDueno, respaldosRouter);
 
   api.use((_req, _res, next) => next(notFound('Ruta de API no encontrada')));
   app.use('/api', api);

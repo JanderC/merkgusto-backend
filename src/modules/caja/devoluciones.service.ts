@@ -17,6 +17,7 @@ import { db } from '../../db/index.js';
 import type { Moneda } from '../../db/types.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/http.js';
 import { convertir, fmt, INFO, MONEDA_REF, redondear } from '../../lib/monedas.js';
+import { moverStock } from '../inventario/kardex.js';
 import { getTasas } from '../tasas/tasas.service.js';
 import { turnoAbierto } from './caja.service.js';
 
@@ -205,12 +206,7 @@ export async function registrarDevolucion(
 
     if (input.reingresaStock) {
       for (const l of lineas) {
-        await trx
-          .updateTable('productos')
-          .set((eb) => ({ stock: eb('stock', '+', l.cantidad) }))
-          .where('id', '=', l.productoId)
-          .where('controlaStock', '=', true)
-          .execute();
+        await moverStock(trx, { productoId: l.productoId, cantidad: l.cantidad, tipo: 'devolucion', referencia: `Devolución ticket #${v.numero}: ${input.motivo}`, usuarioId: usuario.id });
       }
     }
     await trx

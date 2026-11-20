@@ -3,6 +3,7 @@ import { env } from '../config/env.js';
 import { accessControl } from '../modules/biometric/biometric.factory.js';
 import { encolarSocio, procesarCola, recuperarCola, resincronizarVencimientos } from '../modules/biometric/biometric-sync.service.js';
 import { reanudarCongeladasVencidas } from '../modules/membresias/membresias.service.js';
+import { hacerRespaldo } from '../modules/respaldos/respaldos.service.js';
 import { tickTasasAutomaticas } from '../modules/tasas/tasas.service.js';
 import { tickReportes } from '../modules/whatsapp/reportes.service.js';
 
@@ -38,4 +39,7 @@ export async function iniciarTareas() {
 
   // ── WhatsApp: avisos de cierre, reporte diario y recordatorios ──
   cron.schedule('* * * * *', () => void tickReportes().catch((e) => console.error('✗ Reportes WhatsApp:', e.message)), tz);
+
+  // ── Respaldo automático de la base de datos: 03:00 todos los días (se guardan los últimos 14) ──
+  cron.schedule('0 3 * * *', () => void hacerRespaldo('auto').then((r) => console.log(`💾 Respaldo automático: ${r.nombre} (${Math.round(r.bytes / 1024)} KB)`)).catch((e) => console.error('✗ Respaldo automático:', e.message)), tz);
 }

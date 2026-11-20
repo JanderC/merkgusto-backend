@@ -25,6 +25,7 @@ import { convertir, fmt, fmtTodas, INFO, MONEDA_REF, MONEDAS, redondear, totales
 import { encolarSocio } from '../biometric/biometric-sync.service.js';
 import { getConfig } from '../configuracion/config.service.js';
 import { crearMembresias, describirDuracion, type DesdeRenovacion } from '../membresias/membresias.service.js';
+import { moverStock } from '../inventario/kardex.js';
 import { getTasas } from '../tasas/tasas.service.js';
 
 export type ItemVentaInput =
@@ -58,7 +59,7 @@ export async function abrirTurno(cajeroId: string) {
   return db.insertInto('turnos').values({ cajeroId, fondoInicial: 0, fondo: JSON.stringify(fondo) }).returningAll().executeTakeFirstOrThrow();
 }
 
-async function metodosActivos(dbx: Db) {
+export async function metodosActivos(dbx: Db) {
   const metodos = await dbx.selectFrom('metodosPago').selectAll().where('activo', '=', true).execute();
   return (codigo: string, moneda: Moneda) => {
     const m = metodos.find((x) => x.codigo === codigo);
@@ -259,12 +260,7 @@ export async function registrarVenta(
 
     // Inventario
     for (const l of lineas.filter((x) => x.tipo === 'producto')) {
-      await trx
-        .updateTable('productos')
-        .set((eb) => ({ stock: eb('stock', '-', l.cantidad) }))
-        .where('id', '=', l.referenciaId)
-        .where('controlaStock', '=', true)
-        .execute();
+      await moverStock(trx, { productoId: l.referenciaId!, cantidad: -l.cantidad, tipo: 'venta', referencia: `Ticket #${venta.numero}`, usuarioId: cajeroId });
     }
     // Abonos a deudas
     for (const a of abonos) {
@@ -360,9 +356,46 @@ export async function registrarMovimiento(
     .executeTakeFirstOrThrow();
 }
 
+/**
+ * Egreso de administración (sin turno: no toca los cierres de las cajeras).
+ * Lo usan las compras a proveedores y el pago a entrenadores, dentro de su transacción.
+ */
+export async function egresoAdministracion(
+  dbx: Db,
+  m: { usuarioId: string; categoria: string; concepto: string; metodo: string; moneda: Moneda; monto: number; referencia?: string | null; tasas?: Tasas },
+) {
+  (await metodosActivos(dbx))(m.metodo, m.moneda);
+  const t = m.tasas ?? (await getTasas());
+  const monto = redondear(m.monto, m.moneda);
+  return dbx
+    .insertInto('cajaMovimientos')
+    .values({
+      turnoId: null,
+      usuarioId: m.usuarioId,
+      tipo: 'egreso',
+      categoria: m.categoria,
+      concepto: m.concepto.slice(0, 200),
+      metodo: m.metodo,
+      moneda: m.moneda,
+      monto,
+      montoRef: redondear(convertir(monto, m.moneda, MONEDA_REF, t), MONEDA_REF),
+      tasas: JSON.stringify(t),
+      referencia: m.referencia?.trim() || null,
+      comprobanteId: null,
+    })
+    .returning(['id'])
+    .executeTakeFirstOrThrow();
+}
+
 export async function anularMovimiento(id: number, usuarioId: string, motivo: string) {
   const dev = await db.selectFrom('devoluciones').select('id').where('movimientoId', '=', id).executeTakeFirst();
   if (dev) throw conflict('Ese egreso es una devolución autorizada: no se puede anular (quedaría la mercancía devuelta sin su dinero)');
+  const [compra, nomina] = await Promise.all([
+    db.selectFrom('compraPagos').select('compraId').where('movimientoId', '=', id).executeTakeFirst(),
+    db.selectFrom('entrenadorPagos').select('id').where('movimientoId', '=', id).where('anulado', '=', false).executeTakeFirst(),
+  ]);
+  if (compra) throw conflict(`Ese egreso es el pago de la compra #${compra.compraId}: anúlalo desde Inventario › Compras`);
+  if (nomina) throw conflict('Ese egreso es un pago a entrenador: anúlalo desde Entrenadores › Pagos');
   const r = await db
     .updateTable('cajaMovimientos')
     .set({ anulado: true, anuladoPor: usuarioId, motivoAnulacion: motivo })
@@ -627,12 +660,7 @@ export async function anularVenta(ventaId: string, usuarioId: string, motivo: st
     const items = await trx.selectFrom('ventaItems').selectAll().where('ventaId', '=', ventaId).execute();
     for (const it of items) {
       if (it.tipo === 'producto') {
-        await trx
-          .updateTable('productos')
-          .set((eb) => ({ stock: eb('stock', '+', it.cantidad) }))
-          .where('id', '=', it.referenciaId)
-          .where('controlaStock', '=', true)
-          .execute();
+        await moverStock(trx, { productoId: it.referenciaId!, cantidad: it.cantidad, tipo: 'anulacion', referencia: `Ticket #${v.numero} anulado: ${motivo}`, usuarioId });
       } else if (it.tipo === 'abono') {
         // El abono se devuelve a la deuda
         await trx

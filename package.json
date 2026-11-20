@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
+    "db:restaurar": "tsx src/db/restaurar.ts",
     "test:isapi": "tsx scripts/isapi-contract-test.ts",
     "test:e2e": "node scripts/e2e-smoke.mjs"
   },

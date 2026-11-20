@@ -6,6 +6,7 @@ import { ah, badRequest, conflict, notFound, parse } from '../../lib/http.js';
 import { diasEntre, hoy } from '../../lib/util.js';
 import { soloDueno, usuarioActual } from '../../middleware/auth.js';
 import { encolarSocio } from '../biometric/biometric-sync.service.js';
+import { moverStock } from '../inventario/kardex.js';
 import { describirDuracion, diasAproximados } from '../membresias/membresias.service.js';
 
 export const planesRouter = Router();
@@ -287,8 +288,14 @@ productosRouter.post(
   '/',
   soloDueno,
   ah(async (req, res) => {
-    const b = parse(productoSchema, req.body);
-    res.status(201).json(await db.insertInto('productos').values(b).returningAll().executeTakeFirstOrThrow());
+    const { stock, ...b } = parse(productoSchema, req.body);
+    const u = usuarioActual(req);
+    const p = await db.transaction().execute(async (trx) => {
+      const p = await trx.insertInto('productos').values({ ...b, stock: 0 }).returningAll().executeTakeFirstOrThrow();
+      await moverStock(trx, { productoId: p.id, cantidad: stock, tipo: 'ajuste', referencia: 'Stock inicial', usuarioId: u.id });
+      return trx.selectFrom('productos').selectAll().where('id', '=', p.id).executeTakeFirstOrThrow();
+    });
+    res.status(201).json(p);
   }),
 );
 
@@ -296,9 +303,17 @@ productosRouter.put(
   '/:id',
   soloDueno,
   ah(async (req, res) => {
-    const b = parse(productoSchema.partial(), req.body);
-    const p = await db.updateTable('productos').set(b).where('id', '=', Number(req.params.id)).returningAll().executeTakeFirst();
-    if (!p) throw notFound('Producto no encontrado');
+    const { stock, ...b } = parse(productoSchema.partial(), req.body);
+    const id = Number(req.params.id);
+    const u = usuarioActual(req);
+    const p = await db.transaction().execute(async (trx) => {
+      const antes = await trx.selectFrom('productos').select(['stock']).where('id', '=', id).forUpdate().executeTakeFirst();
+      if (!antes) throw notFound('Producto no encontrado');
+      if (Object.keys(b).length) await trx.updateTable('productos').set(b).where('id', '=', id).execute();
+      // Cambiar el stock a mano también queda en el kardex
+      if (stock !== undefined && stock !== antes.stock) await moverStock(trx, { productoId: id, cantidad: stock - antes.stock, tipo: 'ajuste', referencia: 'Ajuste al editar el producto', usuarioId: u.id });
+      return trx.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow();
+    });
     res.json(p);
   }),
 );
@@ -308,14 +323,12 @@ productosRouter.post(
   '/:id/entrada',
   soloDueno,
   ah(async (req, res) => {
-    const { cantidad } = parse(z.object({ cantidad: z.number().int().min(-100_000).max(100_000) }), req.body);
-    const p = await db
-      .updateTable('productos')
-      .set((eb) => ({ stock: eb('stock', '+', cantidad) }))
-      .where('id', '=', Number(req.params.id))
-      .returningAll()
-      .executeTakeFirst();
-    if (!p) throw notFound('Producto no encontrado');
-    res.json(p);
+    const { cantidad, motivo } = parse(z.object({ cantidad: z.number().int().min(-100_000).max(100_000), motivo: z.string().trim().max(150).nullish() }), req.body);
+    const id = Number(req.params.id);
+    const actual = await db.selectFrom('productos').select(['id', 'controlaStock']).where('id', '=', id).executeTakeFirst();
+    if (!actual) throw notFound('Producto no encontrado');
+    if (!actual.controlaStock) throw badRequest('Este producto no lleva control de inventario');
+    await moverStock(db, { productoId: id, cantidad, tipo: 'ajuste', referencia: motivo || (cantidad > 0 ? 'Entrada de mercancía' : 'Salida manual'), usuarioId: usuarioActual(req).id });
+    res.json(await db.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow());
   }),
 );
