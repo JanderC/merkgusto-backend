@@ -122,8 +122,7 @@ console.log('Egresos en el turno (caja ciega)');
 const eg = await call('POST', '/pos/movimientos', { tipo: 'egreso', categoria: 'Proveedores', concepto: 'Pago de botellones', metodo: 'efectivo', moneda: 'COP', monto: 10000 }, C);
 check(eg.s === 201, 'cajera registra egreso de caja', eg.j);
 const vista = (await call('GET', '/pos/turno', null, C)).j;
-const txtVista = JSON.stringify(vista.ventas);
-check(!/total|esperado|pagado|_ref|Ref"/i.test(txtVista) && vista.movimientos.length === 1, 'vista ciega: ventas sin montos, su egreso visible', vista);
+check(vista && Object.keys(vista).sort().join() === 'abiertoEn,id,numero', 'caja ciega total: la cajera no ve ventas, conteos ni gastos', vista);
 
 console.log('Cierre ciego multimoneda');
 // Esperado: efectivo VES 13.750 · USD 30+40 = 70 · COP fondo 50.000 + 5.000 − 16.500 vuelto − 10.000 egreso = 28.500
@@ -362,7 +361,7 @@ const cajaAna2 = (await call('GET', '/caja/en-vivo', null, A)).j.cajas.find((c) 
 const efDespues = cajaAna2.metodos.find((m) => m.metodo === 'efectivo' && m.moneda === 'COP')?.esperado ?? 0;
 check(retiro.s === 201 && retiro.j.turnoId === cajaAna.id && Math.round(efAntes - efDespues) === 1000, 'administración retira efectivo de una caja y se descuenta al instante', { efAntes, efDespues });
 const vistaAna = (await call('GET', '/pos/turno', null, C)).j;
-check(vistaAna.movimientos.some((m) => m.concepto === 'Retiro de efectivo E2E') && !('monto' in vistaAna.movimientos[0]), 'la cajera ve el retiro en su turno (sin sumas)', vistaAna.movimientos[0]);
+check(!('movimientos' in vistaAna) && !('ventas' in vistaAna), 'el retiro no le revela nada a la cajera (caja ciega)', vistaAna);
 
 console.log('Webhook seguro');
 const w = await fetch(`${B}/biometric/events/token-falso`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });

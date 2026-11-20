@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { db } from '../../db/index.js';
-import { ah, notFound, parse } from '../../lib/http.js';
+import { ah, badRequest, notFound, parse } from '../../lib/http.js';
 import { fmt, MONEDA_REF } from '../../lib/monedas.js';
 import { usuarioActual } from '../../middleware/auth.js';
 import { guardarArchivo } from '../archivos/archivos.service.js';
@@ -10,6 +10,7 @@ import { getConfig } from '../configuracion/config.service.js';
 import { describirDuracion } from '../membresias/membresias.service.js';
 import { tasaVigente } from '../tasas/tasas.service.js';
 import { abrirTurno, anularMovimiento, anularVenta, cerrarTurno, registrarMovimiento, registrarVenta, resumenTurnos, vistaCiegaTurno } from './caja.service.js';
+import { listarDevoluciones, registrarDevolucion, ticketParaDevolucion } from './devoluciones.service.js';
 import { cajaEnVivo } from './caja-vivo.js';
 import { excelCierres, excelMovimientos } from './exportar.js';
 
@@ -34,7 +35,7 @@ posRouter.get(
         .execute(),
       db
         .selectFrom('productos')
-        .select(['id', 'nombre', 'categoria', 'precio', 'moneda', 'stock', 'controlaStock'])
+        .select(['id', 'nombre', 'categoria', 'precio', 'moneda', 'stock', 'controlaStock', 'codigoBarras'])
         .where('activo', '=', true)
         .orderBy('categoria')
         .orderBy('nombre')
@@ -144,6 +145,35 @@ posRouter.post(
   }),
 );
 
+// ── Devoluciones: solo con el código de un supervisor ──
+posRouter.get(
+  '/devoluciones/ticket/:numero',
+  ah(async (req, res) => {
+    const numero = Number(String(req.params.numero).replace(/\D/g, ''));
+    if (!numero) throw badRequest('Escribe el número del ticket');
+    res.json(await ticketParaDevolucion(numero, usuarioActual(req)));
+  }),
+);
+
+posRouter.post(
+  '/devoluciones',
+  ah(async (req, res) => {
+    const b = parse(
+      z.object({
+        ventaId: z.string().uuid(),
+        items: z.array(z.object({ ventaItemId: z.number().int().positive(), cantidad: z.number().int().min(0).max(500) })).min(1).max(50),
+        metodo: z.string().max(20),
+        moneda,
+        motivo: z.string().trim().min(4, 'Escribe el motivo de la devolución').max(200),
+        reingresaStock: z.boolean().default(true),
+        pin: z.string().trim().min(1, 'Falta el código del supervisor').max(12),
+      }),
+      req.body,
+    );
+    res.status(201).json(await registrarDevolucion(usuarioActual(req), b));
+  }),
+);
+
 const cierreSchema = z.object({
   declaraciones: z.array(z.object({ metodo: z.string().max(20), moneda, monto: z.number().min(0).max(1e12) })).max(40),
   nota: z.string().max(500).nullish(),
@@ -223,6 +253,13 @@ cajaDuenoRouter.post(
   ah(async (req, res) => {
     const body = parse(cierreSchema, req.body);
     res.json(await cerrarTurno({ turnoId: req.params.id!, cerradoPor: usuarioActual(req).id, declaraciones: body.declaraciones, nota: body.nota, forzadoPorDueno: true }));
+  }),
+);
+
+cajaDuenoRouter.get(
+  '/devoluciones',
+  ah(async (req, res) => {
+    res.json(await listarDevoluciones(parse(z.object({ desde: fecha, hasta: fecha }), req.query)));
   }),
 );
 

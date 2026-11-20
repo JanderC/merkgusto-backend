@@ -266,6 +266,14 @@ const productoSchema = z.object({
   stockMinimo: z.number().int().min(0).max(100_000).default(5),
   controlaStock: z.boolean().default(true),
   activo: z.boolean().default(true),
+  /** Lo que lee la pistola (EAN-13, UPC, código interno…). Vacío = sin código */
+  codigoBarras: z
+    .string()
+    .trim()
+    .max(40)
+    .regex(/^[0-9A-Za-z._\-]*$/, 'Código de barras: solo números, letras, punto o guion')
+    .nullish()
+    .transform((v) => v || null),
 });
 
 productosRouter.get(

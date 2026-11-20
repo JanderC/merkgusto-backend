@@ -361,6 +361,8 @@ export async function registrarMovimiento(
 }
 
 export async function anularMovimiento(id: number, usuarioId: string, motivo: string) {
+  const dev = await db.selectFrom('devoluciones').select('id').where('movimientoId', '=', id).executeTakeFirst();
+  if (dev) throw conflict('Ese egreso es una devolución autorizada: no se puede anular (quedaría la mercancía devuelta sin su dinero)');
   const r = await db
     .updateTable('cajaMovimientos')
     .set({ anulado: true, anuladoPor: usuarioId, motivoAnulacion: motivo })
@@ -375,44 +377,15 @@ export async function anularMovimiento(id: number, usuarioId: string, motivo: st
 
 // ═════════════════ Vista ciega de la cajera ═════════════════
 
-/** Lo que vendió y registró, SIN totales ni lo esperado. */
+/**
+ * Caja ciega total: la cajera solo sabe que su turno está abierto.
+ * Nada de lo que lleva vendido (ni ventas, ni conteos, ni gastos, ni montos):
+ * únicamente ve la comanda que está cobrando y al final declara lo que cuenta.
+ */
 export async function vistaCiegaTurno(cajeroId: string) {
   const turno = await turnoAbierto(cajeroId);
   if (!turno) return null;
-  const [ventas, movimientos] = await Promise.all([
-    db
-      .selectFrom('ventas as v')
-      .leftJoin('socios as s', 's.id', 'v.socioId')
-      .select([
-        'v.id',
-        'v.numero',
-        'v.creadoEn',
-        'v.estado',
-        sql<string | null>`nullif(trim(s.nombre || ' ' || s.apellido), '')`.as('socio'),
-        sql<string[]>`(select array_agg(i.descripcion || case when i.cantidad > 1 then ' ×' || i.cantidad else '' end order by i.id) from venta_items i where i.venta_id = v.id)`.as('items'),
-        sql<string[]>`(select array_agg(distinct m.nombre || ' ' || case p.moneda when 'VES' then 'Bs' when 'COP' then 'COP' else '$' end) from venta_pagos p join metodos_pago m on m.codigo = p.metodo where p.venta_id = v.id and not p.es_vuelto)`.as('metodos'),
-        sql<boolean>`exists (select 1 from deudas d where d.venta_id = v.id)`.as('quedoDebiendo'),
-      ])
-      .where('v.turnoId', '=', turno.id)
-      .orderBy('v.creadoEn', 'desc')
-      .execute(),
-    db
-      .selectFrom('cajaMovimientos as c')
-      .innerJoin('metodosPago as m', 'm.codigo', 'c.metodo')
-      .select(['c.id', 'c.tipo', 'c.categoria', 'c.concepto', 'c.moneda', 'c.monto', 'c.creadoEn', 'c.anulado', 'm.nombre as metodo'])
-      .where('c.turnoId', '=', turno.id)
-      .orderBy('c.creadoEn', 'desc')
-      .execute(),
-  ]);
-  return {
-    id: turno.id,
-    numero: turno.numero,
-    abiertoEn: turno.abiertoEn,
-    operaciones: ventas.filter((v) => v.estado === 'pagada').length,
-    ventas: ventas.map((v) => ({ ...v, items: v.items ?? [], metodos: v.metodos ?? [] })),
-    // Cada movimiento muestra lo que ella misma escribió (su comprobante), nunca sumas
-    movimientos: movimientos.map(({ monto, ...m }) => ({ ...m, montoTexto: fmt(Number(monto), m.moneda) })),
-  };
+  return { id: turno.id, numero: turno.numero, abiertoEn: turno.abiertoEn };
 }
 
 export async function cerrarTurno(args: {
@@ -464,13 +437,8 @@ export async function cerrarTurno(args: {
   });
   bus.emitir('turno:cerrado', { turnoId: turno.id });
 
-  const { n } = await db
-    .selectFrom('ventas')
-    .select((eb) => eb.fn.countAll<number>().as('n'))
-    .where('turnoId', '=', turno.id)
-    .where('estado', '=', 'pagada')
-    .executeTakeFirstOrThrow();
-  return { numero: turno.numero, abiertoEn: turno.abiertoEn, cerradoEn: new Date(), operaciones: Number(n) };
+  // Sin conteos ni montos: el detalle del cierre solo lo ve administración
+  return { numero: turno.numero, abiertoEn: turno.abiertoEn, cerradoEn: new Date() };
 }
 
 // ═════════════════ Solo dueño / administrador de caja ═════════════════
@@ -649,6 +617,8 @@ export async function anularVenta(ventaId: string, usuarioId: string, motivo: st
     const v = await trx.selectFrom('ventas').selectAll().where('id', '=', ventaId).forUpdate().executeTakeFirst();
     if (!v) throw notFound('Venta no encontrada');
     if (v.estado === 'anulada') throw conflict('La venta ya estaba anulada');
+    const dev = await trx.selectFrom('devoluciones').select('id').where('ventaId', '=', ventaId).executeTakeFirst();
+    if (dev) throw conflict('Este ticket ya tiene una devolución de productos: no se puede anular completo');
     await trx
       .updateTable('ventas')
       .set({ estado: 'anulada', anuladaPor: usuarioId, anuladaEn: sql`now()` as never, motivoAnulacion: motivo })

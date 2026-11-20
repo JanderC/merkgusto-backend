@@ -21,6 +21,8 @@ export interface UsuariosTable {
   activo: Generated<boolean>;
   creadoEn: Generated<Date>;
   ultimoAcceso: TimestampNull;
+  /** PIN de supervisor (bcrypt) para autorizar devoluciones */
+  pinHash: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface SociosTable {
@@ -76,6 +78,7 @@ export interface ProductosTable {
   stockMinimo: Generated<number>;
   controlaStock: Generated<boolean>;
   activo: Generated<boolean>;
+  codigoBarras: ColumnType<string | null, string | null | undefined, string | null>;
   creadoEn: Generated<Date>;
 }
 
@@ -385,6 +388,33 @@ export interface AuditoriaTable {
   creadoEn: Generated<Date>;
 }
 
+export interface DevolucionesTable {
+  id: Generated<number>;
+  ventaId: string;
+  turnoId: string;
+  cajeroId: string;
+  autorizadoPor: string;
+  motivo: string;
+  reingresaStock: Generated<boolean>;
+  metodo: string;
+  moneda: Moneda;
+  monto: Num;
+  montoRef: Num;
+  movimientoId: number | null;
+  creadoEn: Generated<Date>;
+}
+
+export interface DevolucionItemsTable {
+  id: Generated<number>;
+  devolucionId: number;
+  ventaItemId: number;
+  productoId: number;
+  descripcion: string;
+  cantidad: number;
+  moneda: Moneda;
+  subtotal: Num;
+}
+
 export interface DB {
   usuarios: UsuariosTable;
   socios: SociosTable;
@@ -412,4 +442,6 @@ export interface DB {
   reportesEnviados: ReportesEnviadosTable;
   configuracion: ConfiguracionTable;
   auditoria: AuditoriaTable;
+  devoluciones: DevolucionesTable;
+  devolucionItems: DevolucionItemsTable;
 }

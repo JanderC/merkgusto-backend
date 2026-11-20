@@ -47,6 +47,9 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   if (pgErr?.type === 'entity.too.large') {
     return res.status(413).json({ ok: false, message: 'La foto o el archivo es demasiado grande' });
   }
+  if (pgErr?.code === '23505' && pgErr.constraint === 'productos_codigo_barras_idx') {
+    return res.status(409).json({ ok: false, message: 'Ese código de barras ya está asignado a otro producto' });
+  }
   if (pgErr?.code === '23505') {
     return res.status(409).json({ ok: false, message: 'Ya existe un registro con esos datos', details: pgErr.detail });
   }

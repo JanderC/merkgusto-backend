@@ -1,9 +1,11 @@
 import bcrypt from 'bcryptjs';
 import { Router } from 'express';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import { db } from '../../db/index.js';
 import { ah, badRequest, notFound, parse } from '../../lib/http.js';
 import { usuarioActual } from '../../middleware/auth.js';
+import { pinEnUso, PIN_REGEX } from '../caja/devoluciones.service.js';
 
 /** Equipo de trabajo (solo dueño). */
 export const usuariosRouter = Router();
@@ -13,7 +15,29 @@ const cols = ['id', 'nombre', 'usuario', 'rol', 'telefono', 'activo', 'creadoEn'
 usuariosRouter.get(
   '/',
   ah(async (_req, res) => {
-    res.json(await db.selectFrom('usuarios').select(cols).orderBy('rol', 'desc').orderBy('nombre').execute());
+    res.json(
+      await db
+        .selectFrom('usuarios')
+        .select([...cols, sql<boolean>`pin_hash is not null`.as('tienePin')])
+        .orderBy('rol', 'desc')
+        .orderBy('nombre')
+        .execute(),
+    );
+  }),
+);
+
+/** Código de autorización de un supervisor (dueño o admin de caja) para devoluciones. Vacío = quitarlo. */
+usuariosRouter.put(
+  '/:id/pin',
+  ah(async (req, res) => {
+    const { pin } = parse(z.object({ pin: z.union([z.literal(''), z.string().regex(PIN_REGEX, 'El código debe tener de 4 a 8 números')]) }), req.body);
+    const u = await db.selectFrom('usuarios').select(['id', 'rol']).where('id', '=', req.params.id!).executeTakeFirst();
+    if (!u) throw notFound('Usuario no encontrado');
+    if (pin && u.rol === 'cajero') throw badRequest('Solo el dueño y los administradores de caja pueden autorizar devoluciones');
+    if (pin && (await pinEnUso(pin, u.id))) throw badRequest('Ese código ya lo usa otro supervisor: elige otro');
+    await db.updateTable('usuarios').set({ pinHash: pin ? await bcrypt.hash(pin, 10) : null }).where('id', '=', u.id).execute();
+    await db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion: pin ? 'usuario.pin_asignado' : 'usuario.pin_quitado', detalle: JSON.stringify({ usuarioId: u.id }) }).execute();
+    res.json({ ok: true, tienePin: !!pin });
   }),
 );
 
@@ -50,9 +74,10 @@ usuariosRouter.put(
       throw badRequest('No puedes desactivarte ni quitarte el rol de dueño');
     }
     const { password, ...rest } = body;
+    const sinPin = rest.rol === 'cajero' ? { pinHash: null } : {};
     const u = await db
       .updateTable('usuarios')
-      .set({ ...rest, ...(rest.telefono !== undefined && { telefono: rest.telefono || null }), ...(password && { passwordHash: await bcrypt.hash(password, 10) }) })
+      .set({ ...rest, ...sinPin, ...(rest.telefono !== undefined && { telefono: rest.telefono || null }), ...(password && { passwordHash: await bcrypt.hash(password, 10) }) })
       .where('id', '=', id)
       .returning(cols)
       .executeTakeFirst();
