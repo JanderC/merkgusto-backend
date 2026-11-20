@@ -28,10 +28,10 @@ export const clasesRouter = Router();
 export const CARACTERISTICAS: CaracteristicaClase[] = ['movilidad', 'fuerza', 'cardio', 'resistencia', 'potencia', 'desplazamiento'];
 const TZ = env.TZ;
 /** Día local (Venezuela) de un instante. */
-const diaLocal = sql<string>`to_char(c.inicio at time zone ${sql.lit(TZ)}, 'YYYY-MM-DD')`;
+export const diaLocal = sql<string>`to_char(c.inicio at time zone ${sql.lit(TZ)}, 'YYYY-MM-DD')`;
 const fechaISO = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
-const claseSchema = z.object({
+export const claseSchema = z.object({
   nombre: z.string().trim().min(2, 'Escribe el nombre de la clase').max(80),
   descripcion: z.string().trim().max(400).nullish(),
   planId: z.number().int().positive().nullish(),
@@ -48,10 +48,10 @@ const claseSchema = z.object({
   repetirSemanas: z.number().int().min(0).max(26).default(0),
 });
 
-const inicioDe = (fecha: string, hora: string) => new Date(`${fecha}T${hora}:00`);
-const limpiarCar = (c: Partial<Record<CaracteristicaClase, number>>) => JSON.stringify(Object.fromEntries(Object.entries(c).filter(([, v]) => (v ?? 0) > 0)));
+export const inicioDe = (fecha: string, hora: string) => new Date(`${fecha}T${hora}:00`);
+export const limpiarCar = (c: Partial<Record<CaracteristicaClase, number>>) => JSON.stringify(Object.fromEntries(Object.entries(c).filter(([, v]) => (v ?? 0) > 0)));
 
-const baseClases = () =>
+export const baseClases = () =>
   db
     .selectFrom('clases as c')
     .leftJoin('planes as p', 'p.id', 'c.planId')
@@ -107,7 +107,7 @@ clasesRouter.get(
 );
 
 /** Cómo está cubierto cada socio el día de la clase. */
-async function coberturas(socioIds: string[], planId: number | null, dia: string) {
+export async function coberturas(socioIds: string[], planId: number | null, dia: string) {
   const out = new Map<string, { acceso: 'plan' | 'mensualidad' | 'sin_mensualidad'; plan: string | null; diasRestantes: number; hasta: string | null; congelada: boolean }>();
   if (!socioIds.length) return out;
   const filas = await db
@@ -134,7 +134,7 @@ async function coberturas(socioIds: string[], planId: number | null, dia: string
   return out;
 }
 
-async function cargarClase(id: number) {
+export async function cargarClase(id: number) {
   const c = await baseClases().where('c.id', '=', id).executeTakeFirst();
   if (!c) throw notFound('Clase no encontrada');
   return c;
@@ -299,17 +299,32 @@ clasesRouter.post(
   '/:id/inscritos',
   ah(async (req, res) => {
     const { socioIds } = parse(z.object({ socioIds: z.array(z.string().uuid()).min(1).max(300) }), req.body);
-    const c = await cargarClase(Number(req.params.id));
-    if (c.estado === 'cancelada') throw badRequest('La clase está cancelada');
-    const ya = new Set((await db.selectFrom('claseInscritos').select('socioId').where('claseId', '=', c.id).execute()).map((r) => r.socioId));
-    const nuevos = [...new Set(socioIds)].filter((s) => !ya.has(s));
-    if (c.cupo && ya.size + nuevos.length > c.cupo) throw conflict(`Cupo lleno: ${ya.size} de ${c.cupo}. Quedan ${Math.max(0, c.cupo - ya.size)} puesto(s)`);
-    const activos = nuevos.length ? await db.selectFrom('socios').select('id').where('id', 'in', nuevos).where('activo', '=', true).execute() : [];
-    if (activos.length !== nuevos.length) throw badRequest('Algún cliente no existe o está inactivo');
-    if (nuevos.length) await db.insertInto('claseInscritos').values(nuevos.map((socioId) => ({ claseId: c.id, socioId, inscritoPor: usuarioActual(req).id }))).execute();
-    res.status(201).json({ agregados: nuevos.length, yaEstaban: socioIds.length - nuevos.length });
+    res.status(201).json(await inscribirEnClase(Number(req.params.id), socioIds, { usuarioId: usuarioActual(req).id }));
   }),
 );
+
+/** Inscribe clientes respetando el cupo (recepción, entrenador o el propio cliente al reservar). */
+export async function inscribirEnClase(claseId: number, socioIds: string[], por: { usuarioId?: string; entrenadorId?: string; socio?: boolean }) {
+  return db.transaction().execute(async (trx) => {
+    // Bloquea la clase para que dos reservas simultáneas no pasen el cupo
+    const c = await trx.selectFrom('clases').select(['id', 'estado', 'cupo', 'inicio']).where('id', '=', claseId).forUpdate().executeTakeFirst();
+    if (!c) throw notFound('Clase no encontrada');
+    if (c.estado === 'cancelada') throw badRequest('La clase está cancelada');
+    if (por.socio && new Date(c.inicio).getTime() < Date.now()) throw badRequest('La clase ya empezó');
+    const ya = new Set((await trx.selectFrom('claseInscritos').select('socioId').where('claseId', '=', c.id).execute()).map((r) => r.socioId));
+    const nuevos = [...new Set(socioIds)].filter((s) => !ya.has(s));
+    if (c.cupo && ya.size + nuevos.length > c.cupo) throw conflict(c.cupo - ya.size <= 0 ? `Cupo lleno: ${ya.size} de ${c.cupo}` : `Cupo lleno: ${ya.size} de ${c.cupo}. Quedan ${c.cupo - ya.size} puesto(s)`);
+    const activos = nuevos.length ? await trx.selectFrom('socios').select('id').where('id', 'in', nuevos).where('activo', '=', true).execute() : [];
+    if (activos.length !== nuevos.length) throw badRequest('Algún cliente no existe o está inactivo');
+    if (nuevos.length) {
+      await trx
+        .insertInto('claseInscritos')
+        .values(nuevos.map((socioId) => ({ claseId: c.id, socioId, inscritoPor: por.usuarioId ?? null, inscritoPorEntrenador: por.entrenadorId ?? null, reservadoPorSocio: !!por.socio })))
+        .execute();
+    }
+    return { agregados: nuevos.length, yaEstaban: socioIds.length - nuevos.length };
+  });
+}
 
 clasesRouter.delete(
   '/:id/inscritos/:socioId',
@@ -330,45 +345,66 @@ clasesRouter.post(
   '/:id/inscritos/:socioId/pasar',
   ah(async (req, res) => {
     const b = parse(z.object({ cobertura: z.enum(['pase', 'cortesia']).optional(), nota: z.string().trim().max(200).nullish() }), req.body ?? {});
-    const c = await cargarClase(Number(req.params.id));
-    if (c.estado === 'cancelada') throw badRequest('La clase está cancelada');
-    if (c.dia !== hoy()) throw badRequest(`La entrada se da el día de la clase (${c.dia.split('-').reverse().join('/')})`);
-    const socioId = req.params.socioId!;
-    const ins = await db.selectFrom('claseInscritos').select(['id', 'asistioEn']).where('claseId', '=', c.id).where('socioId', '=', socioId).executeTakeFirst();
-    if (!ins) throw notFound('No está inscrito en esta clase');
-    if (ins.asistioEn) throw conflict('Ya entró a esta clase');
-    const cob = (await coberturas([socioId], c.planId, c.dia)).get(socioId)!;
-    const cobertura = cob.acceso === 'plan' ? 'plan' : cob.acceso === 'mensualidad' ? 'mensualidad' : b.cobertura;
-    if (!cobertura) throw badRequest('No tiene mensualidad: indica si pagó su pase o si lo dejas pasar como cortesía');
-    const u = usuarioActual(req);
-    const socio = await db.selectFrom('socios').select(['codigo']).where('id', '=', socioId).executeTakeFirstOrThrow();
-    // Si ya entró al gym hace poco (lector o recepción), se usa esa entrada
-    const reciente = await db
-      .selectFrom('asistencias')
-      .select('id')
-      .where('socioId', '=', socioId)
-      .where('resultado', '=', 'permitido')
-      .where('fechaHora', '>', sql<Date>`now() - interval '3 hours'`)
-      .orderBy('fechaHora', 'desc')
-      .executeTakeFirst();
-    const asistenciaId =
-      reciente?.id ??
-      (
-        await db
-          .insertInto('asistencias')
-          .values({ socioId, employeeNo: String(socio.codigo), fechaHora: new Date(), origen: 'manual', resultado: 'permitido', motivo: `Clase ${c.nombre} · ${TEXTO_COB[cobertura]}`, registradoPor: u.id })
-          .returning('id')
-          .executeTakeFirstOrThrow()
-      ).id;
-    await db
-      .updateTable('claseInscritos')
-      .set({ cobertura, asistioEn: new Date(), asistenciaId, pasoPor: u.id, nota: b.nota ?? null })
-      .where('id', '=', ins.id)
-      .execute();
-    if (cobertura === 'cortesia') await db.insertInto('auditoria').values({ usuarioId: u.id, accion: 'clase.cortesia', detalle: JSON.stringify({ claseId: c.id, socioId, nota: b.nota ?? null }) }).execute();
-    res.json({ ok: true, cobertura, texto: TEXTO_COB[cobertura] });
+    res.json(await pasarAClase(Number(req.params.id), req.params.socioId!, b, { usuarioId: usuarioActual(req).id }));
   }),
 );
+
+/**
+ * Registra la entrada a la clase (y al gimnasio). La usan la recepción y el entrenador
+ * desde su app; el entrenador solo puede dar entrada a quien tiene plan o mensualidad.
+ */
+export async function pasarAClase(
+  claseId: number,
+  socioId: string,
+  b: { cobertura?: 'pase' | 'cortesia'; nota?: string | null },
+  por: { usuarioId?: string; entrenadorId?: string },
+) {
+  const c = await cargarClase(claseId);
+  if (c.estado === 'cancelada') throw badRequest('La clase está cancelada');
+  if (c.dia !== hoy()) throw badRequest(`La entrada se da el día de la clase (${c.dia.split('-').reverse().join('/')})`);
+  const ins = await db.selectFrom('claseInscritos').select(['id', 'asistioEn']).where('claseId', '=', c.id).where('socioId', '=', socioId).executeTakeFirst();
+  if (!ins) throw notFound('No está inscrito en esta clase');
+  if (ins.asistioEn) throw conflict('Ya entró a esta clase');
+  const cob = (await coberturas([socioId], c.planId, c.dia)).get(socioId)!;
+  const cobertura = cob.acceso === 'plan' ? 'plan' : cob.acceso === 'mensualidad' ? 'mensualidad' : por.entrenadorId ? undefined : b.cobertura;
+  if (!cobertura) {
+    throw badRequest(por.entrenadorId ? 'No tiene mensualidad vigente: que pase por recepción a pagar su pase' : 'No tiene mensualidad: indica si pagó su pase o si lo dejas pasar como cortesía');
+  }
+  const socio = await db.selectFrom('socios').select(['codigo']).where('id', '=', socioId).executeTakeFirstOrThrow();
+  // Si ya entró al gym hace poco (lector o recepción), se usa esa entrada
+  const reciente = await db
+    .selectFrom('asistencias')
+    .select('id')
+    .where('socioId', '=', socioId)
+    .where('resultado', '=', 'permitido')
+    .where('fechaHora', '>', sql<Date>`now() - interval '3 hours'`)
+    .orderBy('fechaHora', 'desc')
+    .executeTakeFirst();
+  const asistenciaId =
+    reciente?.id ??
+    (
+      await db
+        .insertInto('asistencias')
+        .values({
+          socioId,
+          employeeNo: String(socio.codigo),
+          fechaHora: new Date(),
+          origen: 'manual',
+          resultado: 'permitido',
+          motivo: `Clase ${c.nombre} · ${TEXTO_COB[cobertura]}${por.entrenadorId ? ' · entrenador' : ''}`,
+          registradoPor: por.usuarioId ?? null,
+        })
+        .returning('id')
+        .executeTakeFirstOrThrow()
+    ).id;
+  await db
+    .updateTable('claseInscritos')
+    .set({ cobertura, asistioEn: new Date(), asistenciaId, pasoPor: por.usuarioId ?? null, pasoPorEntrenador: por.entrenadorId ?? null, nota: b.nota ?? null })
+    .where('id', '=', ins.id)
+    .execute();
+  if (cobertura === 'cortesia') await db.insertInto('auditoria').values({ usuarioId: por.usuarioId ?? null, accion: 'clase.cortesia', detalle: JSON.stringify({ claseId: c.id, socioId, nota: b.nota ?? null }) }).execute();
+  return { ok: true, cobertura, texto: TEXTO_COB[cobertura] };
+}
 
 /** Deshacer la entrada a la clase (se equivocó de persona). */
 clasesRouter.post(

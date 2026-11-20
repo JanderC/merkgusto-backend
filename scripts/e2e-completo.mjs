@@ -131,7 +131,7 @@ check(link.s === 200 && /\/socio\/[A-Za-z0-9_-]{20,}$/.test(link.j.url), 'genera
 const token = link.j.url.split('/socio/')[1];
 const portal = await call('GET', `/portal/${token}`);
 check(portal.s === 200 && portal.j.socio.nombre === 'María' && portal.j.mediciones.length === 2 && portal.j.rutina?.titulo === 'Fuerza', 'el cliente abre su portal sin usuario ni clave', portal.j);
-check(!JSON.stringify(portal.j).includes('cedula') && !('telefono' in portal.j.socio), 'el portal no expone cédula ni teléfono');
+check(!JSON.stringify(portal.j).includes(soc.cedula) && !('telefono' in portal.j.socio), 'el portal no expone la cédula completa ni el teléfono', portal.j.socio);
 check((await call('GET', '/portal/esto-no-es-un-token-valido-xx')).s === 404, 'enlace inventado: no entra');
 const link2 = await call('POST', `/socios/${soc.id}/portal`, { baseUrl: 'http://localhost:5173' }, C);
 check((await call('GET', `/portal/${token}`)).s === 404 && (await call('GET', `/portal/${link2.j.url.split('/socio/')[1]}`)).s === 200, 'regenerar el enlace invalida el anterior');

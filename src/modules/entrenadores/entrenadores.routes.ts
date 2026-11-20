@@ -93,7 +93,28 @@ admin.get(
     res.json(
       await db
         .selectFrom('entrenadores')
-        .select(['id', 'codigo', 'nombre', 'apellido', 'cedula', 'telefono', 'especialidad', 'horario', 'activo', 'bioEstado', 'bioError', 'creadoEn', 'pagoTipo', 'pagoTarifa', 'pagoMoneda', sql<boolean>`foto is not null`.as('tieneFoto')])
+        .select([
+          'id',
+          'codigo',
+          'nombre',
+          'apellido',
+          'cedula',
+          'telefono',
+          'especialidad',
+          'horario',
+          'activo',
+          'bioEstado',
+          'bioError',
+          'creadoEn',
+          'pagoTipo',
+          'pagoTarifa',
+          'pagoMoneda',
+          'usuario',
+          'ultimoAcceso',
+          sql<boolean>`password_hash is not null`.as('tieneAcceso'),
+          sql<number>`(select count(*)::int from socios s where s.entrenador_id = entrenadores.id and s.activo)`.as('clientes'),
+          sql<boolean>`foto is not null`.as('tieneFoto'),
+        ])
         .orderBy('activo', 'desc')
         .orderBy('nombre')
         .execute(),
@@ -162,6 +183,49 @@ admin.put(
       .where('id', '=', prev.id)
       .execute();
     if (fotoCambio || b.activo !== undefined || b.nombre) await encolarEntrenador(prev.id);
+    res.json({ ok: true });
+  }),
+);
+
+/** Usuario y contraseña del entrenador para su app (ve a sus clientes, sus clases y sus rutinas). */
+admin.put(
+  '/:id/acceso',
+  ah(async (req, res) => {
+    const b = parse(
+      z.object({
+        usuario: z
+          .string()
+          .trim()
+          .toLowerCase()
+          .regex(/^[a-z0-9._-]{3,60}$/, 'Usuario: 3 a 60 letras, números, punto o guion'),
+        password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres').max(100).optional(),
+      }),
+      req.body,
+    );
+    const e = await db.selectFrom('entrenadores').select(['id', 'passwordHash', 'sesionVersion']).where('id', '=', req.params.id!).executeTakeFirst();
+    if (!e) throw notFound('Entrenador no encontrado');
+    if (!e.passwordHash && !b.password) throw badRequest('Escribe una contraseña para darle acceso');
+    const enUso =
+      (await db.selectFrom('usuarios').select('id').where(sql`lower(usuario)`, '=', b.usuario).executeTakeFirst()) ??
+      (await db.selectFrom('entrenadores').select('id').where(sql`lower(usuario)`, '=', b.usuario).where('id', '!=', e.id).executeTakeFirst());
+    if (enUso) throw badRequest('Ese usuario ya existe: elige otro');
+    await db
+      .updateTable('entrenadores')
+      .set({ usuario: b.usuario, ...(b.password && { passwordHash: await bcrypt.hash(b.password, 10), sesionVersion: e.sesionVersion + 1 }) })
+      .where('id', '=', e.id)
+      .execute();
+    await db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion: 'entrenador.acceso', detalle: JSON.stringify({ entrenadorId: e.id, usuario: b.usuario, nuevaClave: !!b.password }) }).execute();
+    res.json({ ok: true });
+  }),
+);
+
+admin.delete(
+  '/:id/acceso',
+  ah(async (req, res) => {
+    const e = await db.selectFrom('entrenadores').select(['id', 'sesionVersion']).where('id', '=', req.params.id!).executeTakeFirst();
+    if (!e) throw notFound('Entrenador no encontrado');
+    await db.updateTable('entrenadores').set({ passwordHash: null, sesionVersion: e.sesionVersion + 1 }).where('id', '=', e.id).execute();
+    await db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion: 'entrenador.acceso_quitado', detalle: JSON.stringify({ entrenadorId: e.id }) }).execute();
     res.json({ ok: true });
   }),
 );

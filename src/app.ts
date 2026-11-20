@@ -5,11 +5,12 @@ import compression from 'compression';
 import cors from 'cors';
 import express, { Router } from 'express';
 import helmet from 'helmet';
-import jwt from 'jsonwebtoken';
 import { env } from './config/env.js';
 import { checkDatabase } from './db/index.js';
 import { errorHandler, notFound, unauthorized } from './lib/http.js';
-import { gestionCaja, requireAuth, soloDueno } from './middleware/auth.js';
+import { gestionCaja, requireAuth, requireEntrenador, requireSocio, soloDueno, tokenEquipoOEntrenador } from './middleware/auth.js';
+import { clienteAuthRouter, clienteRouter } from './modules/app-cliente/cliente.routes.js';
+import { coachRouter } from './modules/app-entrenador/coach.routes.js';
 import { verArchivo } from './modules/archivos/archivos.routes.js';
 import { entrenadorFotoHandler, entrenadoresRouter } from './modules/entrenadores/entrenadores.routes.js';
 import { finanzasRouter } from './modules/finanzas/finanzas.routes.js';
@@ -62,25 +63,21 @@ export function createApp() {
   api.use('/auth', authRouter);
   // Portal del cliente: enlace personal, sin sesión (solo lectura)
   api.use('/portal', portalRouter);
+  // App del cliente (cédula + clave opcional, o su enlace) y app de entrenadores
+  api.use('/cliente', clienteAuthRouter);
+  api.use('/cliente', requireSocio, clienteRouter);
+  api.use('/coach', requireEntrenador, coachRouter);
 
   // <img src> no puede enviar cabeceras: la foto acepta el token por query
   api.get('/socios/:id/foto', (req, _res, next) => {
-    try {
-      jwt.verify(String(req.query.t ?? ''), env.JWT_SECRET);
-      next();
-    } catch {
-      next(unauthorized());
-    }
+    if (tokenEquipoOEntrenador(String(req.query.t ?? ''))) next();
+    else next(unauthorized());
   }, socioFotoHandler);
 
   api.get('/archivos/:id', ...verArchivo);
   api.get('/entrenadores/:id/foto', (req, _res, next) => {
-    try {
-      jwt.verify(String(req.query.t ?? ''), env.JWT_SECRET);
-      next();
-    } catch {
-      next(unauthorized());
-    }
+    if (tokenEquipoOEntrenador(String(req.query.t ?? ''))) next();
+    else next(unauthorized());
   }, entrenadorFotoHandler);
 
   // ── Con sesión (todo el equipo) ──

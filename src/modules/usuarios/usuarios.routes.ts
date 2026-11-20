@@ -52,10 +52,17 @@ const base = z.object({
   rol: z.enum(['dueno', 'admin_caja', 'cajero']).default('cajero'),
 });
 
+/** Los usuarios del equipo y de los entrenadores comparten la misma pantalla de entrada. */
+async function usuarioLibre(usuario: string) {
+  const e = await db.selectFrom('entrenadores').select('id').where(sql`lower(usuario)`, '=', usuario.toLowerCase()).executeTakeFirst();
+  if (e) throw badRequest('Ese usuario ya lo usa un entrenador: elige otro');
+}
+
 usuariosRouter.post(
   '/',
   ah(async (req, res) => {
     const body = parse(base.extend({ password: z.string().min(4, 'Mínimo 4 caracteres').max(100) }), req.body);
+    await usuarioLibre(body.usuario);
     const u = await db
       .insertInto('usuarios')
       .values({ nombre: body.nombre, usuario: body.usuario, telefono: body.telefono || null, rol: body.rol, passwordHash: await bcrypt.hash(body.password, 10) })
@@ -73,6 +80,7 @@ usuariosRouter.put(
     if (id === usuarioActual(req).id && (body.activo === false || body.rol === 'cajero')) {
       throw badRequest('No puedes desactivarte ni quitarte el rol de dueño');
     }
+    if (body.usuario) await usuarioLibre(body.usuario);
     const { password, ...rest } = body;
     const sinPin = rest.rol === 'cajero' ? { pinHash: null } : {};
     const u = await db

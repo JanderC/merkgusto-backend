@@ -45,6 +45,13 @@ export interface SociosTable {
   actualizadoEn: Generated<Date>;
   portalTokenHash: ColumnType<string | null, string | null | undefined, string | null>;
   portalCreadoEn: TimestampNull;
+  /** Entrenador que lo atiende (lo ve en su app) */
+  entrenadorId: ColumnType<string | null, string | null | undefined, string | null>;
+  /** Clave de la app (bcrypt). Null = entra solo con su cédula */
+  claveHash: ColumnType<string | null, string | null | undefined, string | null>;
+  claveCreadaEn: TimestampNull;
+  appUltimoAcceso: TimestampNull;
+  appSesion: Generated<number>;
 }
 
 export interface PlanesTable {
@@ -263,6 +270,10 @@ export interface EntrenadoresTable {
   pagoTipo: Generated<PagoTipo>;
   pagoTarifa: ColumnType<number, number | string | undefined, number | string>;
   pagoMoneda: Generated<Moneda>;
+  usuario: ColumnType<string | null, string | null | undefined, string | null>;
+  passwordHash: ColumnType<string | null, string | null | undefined, string | null>;
+  ultimoAcceso: TimestampNull;
+  sesionVersion: Generated<number>;
 }
 
 export type PagoTipo = 'ninguno' | 'fijo' | 'por_hora' | 'por_clase';
@@ -329,6 +340,9 @@ export interface ClaseInscritosTable {
   inscritoPor: string | null;
   pasoPor: string | null;
   creadoEn: Generated<Date>;
+  inscritoPorEntrenador: ColumnType<string | null, string | null | undefined, string | null>;
+  pasoPorEntrenador: ColumnType<string | null, string | null | undefined, string | null>;
+  reservadoPorSocio: Generated<boolean>;
 }
 
 export interface AsistenciasTable {
@@ -552,7 +566,11 @@ export interface SocioMedicionesTable {
   nota: string | null;
   registradoPor: string | null;
   creadoEn: Generated<Date>;
+  autor: Generated<Autor>;
+  entrenadorId: ColumnType<string | null, string | null | undefined, string | null>;
 }
+
+export type Autor = 'equipo' | 'entrenador' | 'cliente';
 
 export interface DiaRutina {
   nombre: string;
@@ -570,6 +588,35 @@ export interface SocioRutinasTable {
   creadoPor: string | null;
   creadoEn: Generated<Date>;
   actualizadoEn: Timestamp;
+  autor: Generated<Autor>;
+}
+
+export interface RutinaPlantillasTable {
+  id: Generated<number>;
+  entrenadorId: string;
+  titulo: string;
+  objetivo: string | null;
+  dias: ColumnType<DiaRutina[], string | undefined, string>;
+  creadoEn: Generated<Date>;
+  actualizadoEn: Timestamp;
+}
+
+export interface EntrenadorNotasTable {
+  id: Generated<number>;
+  entrenadorId: string;
+  socioId: string;
+  texto: string;
+  creadoEn: Generated<Date>;
+}
+
+export interface SocioEntrenosTable {
+  id: Generated<number>;
+  socioId: string;
+  fecha: ColumnType<string, string, string>;
+  rutinaId: number | null;
+  dia: Generated<string>;
+  nota: string | null;
+  creadoEn: Generated<Date>;
 }
 
 export interface DB {
@@ -611,4 +658,7 @@ export interface DB {
   entrenadorPagos: EntrenadorPagosTable;
   socioMediciones: SocioMedicionesTable;
   socioRutinas: SocioRutinasTable;
+  rutinaPlantillas: RutinaPlantillasTable;
+  entrenadorNotas: EntrenadorNotasTable;
+  socioEntrenos: SocioEntrenosTable;
 }

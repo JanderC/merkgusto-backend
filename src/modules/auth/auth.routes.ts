@@ -4,7 +4,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { db } from '../../db/index.js';
 import { ah, badRequest, parse, unauthorized } from '../../lib/http.js';
-import { requireAuth, signToken, usuarioActual } from '../../middleware/auth.js';
+import { requireAuth, signToken, tokenEntrenador, usuarioActual } from '../../middleware/auth.js';
 
 export const authRouter = Router();
 
@@ -20,6 +20,20 @@ authRouter.post(
     if (f && f.n >= 8 && Date.now() - f.t < 10 * 60_000) throw unauthorized('Demasiados intentos. Espera unos minutos.');
 
     const u = await db.selectFrom('usuarios').selectAll().where(sql`lower(usuario)`, '=', key).executeTakeFirst();
+    if (!u) {
+      // ¿Es un entrenador? Entra a su propia app (/coach)
+      const e = await db
+        .selectFrom('entrenadores')
+        .select(['id', 'nombre', 'apellido', 'usuario', 'passwordHash', 'activo', 'sesionVersion'])
+        .where(sql`lower(usuario)`, '=', key)
+        .executeTakeFirst();
+      if (e?.passwordHash && e.activo && (await bcrypt.compare(password, e.passwordHash))) {
+        fallos.delete(key);
+        await db.updateTable('entrenadores').set({ ultimoAcceso: sql`now()` as never }).where('id', '=', e.id).execute();
+        const nombre = `${e.nombre} ${e.apellido}`.trim();
+        return void res.json({ tipo: 'entrenador', token: tokenEntrenador(e), user: { id: e.id, usuario: e.usuario, nombre, rol: 'entrenador' } });
+      }
+    }
     if (!u || !u.activo || !(await bcrypt.compare(password, u.passwordHash))) {
       fallos.set(key, { n: (f && Date.now() - f.t < 10 * 60_000 ? f.n : 0) + 1, t: Date.now() });
       throw unauthorized('Usuario o contraseña incorrectos');
@@ -27,7 +41,7 @@ authRouter.post(
     fallos.delete(key);
     await db.updateTable('usuarios').set({ ultimoAcceso: sql`now()` as never }).where('id', '=', u.id).execute();
     const user = { id: u.id, usuario: u.usuario, nombre: u.nombre, rol: u.rol };
-    res.json({ token: signToken(user), user });
+    res.json({ tipo: 'equipo', token: signToken(user), user });
   }),
 );
 
