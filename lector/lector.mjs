@@ -288,6 +288,46 @@ async function prueba() {
   }
 }
 
+// ═════════ 4. Ver personas (solo lee) ═════════
+async function personas() {
+  decir('PERSONAS DEL LECTOR (solo lee, no cambia nada)\n');
+  const c = await entrar();
+  if (!c) return;
+  const { lector } = c;
+  const reloj = await L.revisarReloj(lector);
+  paso(reloj.ok ? 'PASA' : 'OJO', 'Reloj', reloj.detalle);
+  const todas = [];
+  for (let pos = 0; pos < 3000; pos += 30) {
+    const r = await lector.pedir('POST', '/ISAPI/AccessControl/UserInfo/Search?format=json', { json: { UserInfoSearchCond: { searchID: `ver${Date.now()}`, searchResultPosition: pos, maxResults: 30 } } });
+    const s = r.json?.UserInfoSearch;
+    if (!s) {
+      paso('FALLA', 'Leer personas', L.resultado(r).detalle);
+      return;
+    }
+    todas.push(...(s.UserInfo ?? []));
+    if (s.responseStatusStrg !== 'MORE' || !(s.UserInfo ?? []).length) break;
+  }
+  const ahora = L.horaGym();
+  const tipo = (id) => (/^E\d+$/.test(id) ? 'entrenador' : /^\d+$/.test(id) ? 'cliente' : 'otro');
+  decir(`\n  ${todas.length} personas · ahora en el lector: ${ahora}\n`);
+  for (const u of todas) {
+    const v = u.Valid ?? {};
+    const problemas = [];
+    if (!u.numOfFace) problemas.push('SIN ROSTRO');
+    if (u.userType && u.userType !== 'normal') problemas.push(`tipo ${u.userType}`);
+    if (v.enable && v.beginTime > ahora) problemas.push('aún no empieza');
+    if (v.enable && v.endTime < ahora) problemas.push('vencido');
+    if (!u.doorRight) problemas.push('sin permiso de puerta');
+    const linea = `${tipo(u.employeeNo).padEnd(10)} ${String(u.employeeNo).padEnd(10)} ${String(u.name ?? '').slice(0, 24).padEnd(24)} ${v.enable ? `${v.beginTime?.slice(0, 10)} → ${v.endTime?.slice(0, 10)}` : 'sin fechas'.padEnd(23)}  ${problemas.length ? `<< ${problemas.join(', ')}` : 'ok'}`;
+    decir(`  ${linea}`);
+    registro.push(`    detalle ${u.employeeNo}: ${JSON.stringify({ userType: u.userType, Valid: u.Valid, doorRight: u.doorRight, RightPlan: u.RightPlan, numOfFace: u.numOfFace, userVerifyMode: u.userVerifyMode, localUIRight: u.localUIRight })}`);
+  }
+  const ents = todas.filter((u) => tipo(u.employeeNo) === 'entrenador');
+  paso(ents.length ? 'PASA' : 'OJO', 'Entrenadores en el lector', ents.length ? `${ents.length}` : 'ninguno: el sistema no los ha enviado');
+  const malos = ents.filter((u) => !u.numOfFace || (u.Valid?.enable && (u.Valid.endTime < ahora || u.Valid.beginTime > ahora)));
+  if (ents.length) paso(malos.length ? 'FALLA' : 'PASA', 'Entrenadores con rostro y fechas válidas', malos.length ? malos.map((u) => u.employeeNo).join(', ') : 'todos');
+}
+
 // ═════════ 3. Conectar con el sistema ═════════
 async function conectar() {
   decir('CONECTAR CON EL SISTEMA\n');
@@ -321,13 +361,14 @@ Espera a que redespliegue y abre PUENTE.bat. Debe decir "sistema: conectado" y "
 `);
 }
 
-const OPCIONES = { 1: ['diagnostico', diagnostico], 2: ['prueba', prueba], 3: ['conectar', conectar] };
+const OPCIONES = { 1: ['diagnostico', diagnostico], 2: ['prueba', prueba], 3: ['conectar', conectar], 4: ['personas', personas] };
 console.log(`
 LECTOR FACIAL · MERKGUSTO GYM · Hikvision DS-K1T321MFWX
 
   1. Diagnóstico (solo lee)
   2. Prueba real con una persona
   3. Conectar con el sistema
+  4. Ver personas del lector (solo lee)
 `);
 const elegida = OPCIONES[process.argv[2] ?? (await preguntar('Opción', '1'))];
 if (elegida) {

@@ -3,8 +3,8 @@
  *
  *  Duración por unidades:
  *   • días     → 1 de nov + 1 día   = vigente solo el 1 de nov
- *   • semanas  → 1 de nov + 1 sem   = hasta el 7 de nov
- *   • meses    → MES A MES: 15 de ene + 1 mes = hasta el 14 de feb (renueva el 15 de feb).
+ *   • semanas  → SEMANA A SEMANA: lunes 23 + 1 sem = hasta el lunes 30 (renueva → lunes 7).
+ *   • meses    → MES A MES: 23 de nov + 1 mes = hasta el 23 de dic (renueva → 23 de ene).
  *                Si el mes no tiene ese día (31) se usa el último día del mes.
  *   • años     → 12 meses
  *
@@ -40,7 +40,7 @@ export function sumarMeses(fecha: string, meses: number): string {
 
 /**
  * Último día de vigencia (inclusive).
- * Meses y años van "mes a mes": del 23 de noviembre al 23 de diciembre. Si renueva
+ * Semanas, meses y años van "de día a día": lunes 23 → lunes 30; 23 nov → 23 dic. Si renueva
  * continuando, el ancla es el vencimiento anterior (23 dic → 23 ene), así el día no se corre.
  */
 export function calcularFin(inicio: string, p: PlanDuracion, ancla?: string): string {
@@ -50,7 +50,8 @@ export function calcularFin(inicio: string, p: PlanDuracion, ancla?: string): st
     case 'anios':
       return sumarMeses(ancla ?? inicio, p.cantidad * 12);
     case 'semanas':
-      return sumarDias(inicio, p.cantidad * 7 - 1);
+      // Semana a semana: de lunes a lunes; renovando, desde el vencimiento anterior
+      return sumarDias(ancla ?? inicio, p.cantidad * 7);
     default:
       return sumarDias(inicio, p.cantidad - 1);
   }

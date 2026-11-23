@@ -106,6 +106,16 @@ check(v2.j?.membresias?.[0]?.fechaInicio === H && v2.j?.membresias?.[0]?.fechaFi
 const v3 = await call('POST', '/pos/ventas', { socioId: s1.id, items: [{ tipo: 'membresia', id: mensual.id }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 30 }], vuelto: { metodo: 'efectivo', moneda: 'COP', monto: 5 * T.usdCop } }, C);
 check(v3.s === 201 && v3.j.vuelto?.texto === 'COP 16.500', 'renovación con $30 y vuelto COP 16.500', v3.j);
 check(v3.j?.membresias?.[0]?.fechaInicio === sumarDias(sumarMeses(H, 1), 1) && v3.j?.membresias?.[0]?.fechaFin === sumarMeses(H, 2), 'la renovación sigue mes a mes sin correr el día (23 → 23)', v3.j?.membresias);
+const semanal = (await call('POST', '/planes', { nombre: 'Semanal E2E', tipoDuracion: 'semanas', cantidad: 1, precio: 8, moneda: 'USD' }, D)).j;
+// En una caja aparte: la caja de la cajera principal se cuadra más abajo
+await call('POST', '/usuarios', { nombre: `Caja Semana ${sfx}`, usuario: `cs${sfx}`, rol: 'cajero', password: '1234' }, D);
+const CS = (await call('POST', '/auth/login', { usuario: `cs${sfx}`, password: '1234' })).j.token;
+await call('POST', '/pos/turno/abrir', {}, CS);
+const sS = (await call('POST', '/socios', { nombre: 'Sara', apellido: 'Semana', telefono: '04141234599', cedula: `V${sfx}19` }, CS)).j;
+const vS1 = await call('POST', '/pos/ventas', { socioId: sS.id, items: [{ tipo: 'membresia', id: semanal.id }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 8 }] }, CS);
+check(vS1.j?.membresias?.[0]?.fechaInicio === H && vS1.j?.membresias?.[0]?.fechaFin === sumarDias(H, 7), 'semana a semana: lunes 23 → lunes 30 (mismo día)', vS1.j?.membresias);
+const vS2 = await call('POST', '/pos/ventas', { socioId: sS.id, items: [{ tipo: 'membresia', id: semanal.id }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 8 }] }, CS);
+check(vS2.j?.membresias?.[0]?.fechaInicio === sumarDias(H, 8) && vS2.j?.membresias?.[0]?.fechaFin === sumarDias(H, 14), 'renovar la semana sigue el mismo día (lunes 30 → lunes 7)', vS2.j?.membresias);
 const vDuo1 = await call('POST', '/pos/ventas', { socioId: s2.id, items: [{ tipo: 'membresia', id: duo.id }], pagos: [{ metodo: 'zelle', moneda: 'USD', monto: 40, referencia: 'z1' }] }, C);
 check(vDuo1.s === 400, 'plan dúo exige acompañante', vDuo1.j);
 const vDuo = await call('POST', '/pos/ventas', { socioId: s2.id, items: [{ tipo: 'membresia', id: duo.id, acompanantes: [s3.id] }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 40 }] }, C);

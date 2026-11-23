@@ -138,6 +138,12 @@ const lectorFalso = http.createServer((req, res) => {
       F.avisoUrl = de('ipAddress') ? `http://${de('ipAddress')}:${de('portNo')}${de('url')}` : null;
       return bien();
     }
+    if (k === 'POST /ISAPI/AccessControl/UserInfo/Search') {
+      const pos = JSON.parse(b.toString()).UserInfoSearchCond.searchResultPosition;
+      const todas = [...F.personas.values()].map((p) => ({ ...p, numOfFace: F.rostros.has(p.employeeNo) ? 1 : 0 }));
+      const pag = todas.slice(pos, pos + 30);
+      return enviar(200, 'application/json', JSON.stringify({ UserInfoSearch: { responseStatusStrg: pos + 30 < todas.length ? 'MORE' : 'OK', numOfMatches: pag.length, totalMatches: todas.length, UserInfo: pag } }));
+    }
     if (k.endsWith('UserInfo/Count')) return enviar(200, 'application/json', `{"UserInfoCount":{"userNumber":${F.personas.size}}}`);
     if (k.endsWith('FDLib/Count')) return enviar(200, 'application/json', `{"FDRecordDataInfo":[{"recordDataNumber":${F.rostros.size}}]}`);
     return no('notSupport', 403);
@@ -292,6 +298,15 @@ try {
   check(/Corregir reloj tras el corte/.test(k.salida), 'kit: corrige el reloj tras el corte de luz');
   check(!F.personas.size && !F.rostros.size, 'borra las personas de prueba', [...F.personas.keys()]);
   check(F.avisoXml.includes('/original'), 'restaura el aviso de eventos que tenía');
+  // Opción 4: un entrenador sin rostro y uno bien, más 40 clientes (varias páginas)
+  F.personas.set('E5', { employeeNo: 'E5', name: 'Sin Rostro', userType: 'normal', Valid: { enable: true, beginTime: '2020-01-01T00:00:00', endTime: '2037-12-31T23:59:59' }, doorRight: '1' });
+  F.personas.set('E6', { employeeNo: 'E6', name: 'Con Rostro', userType: 'normal', Valid: { enable: true, beginTime: '2020-01-01T00:00:00', endTime: '2037-12-31T23:59:59' }, doorRight: '1' });
+  F.rostros.set('E6', 1);
+  for (let i = 0; i < 40; i++) F.personas.set(String(5000 + i), { employeeNo: String(5000 + i), name: `Cliente ${i}`, userType: 'normal', Valid: { enable: true, beginTime: '2026-01-01T00:00:00', endTime: '2037-01-01T00:00:00' }, doorRight: '1' });
+  k = await kit(4);
+  check(/42 personas/.test(k.salida) && /E5 .*SIN ROSTRO/.test(k.salida) && /\[FALLA\] Entrenadores con rostro y fechas válidas: E5/.test(k.salida) && !/E6 .*<</.test(k.salida), 'opción 4: lista todas (2 páginas) y marca al entrenador sin rostro', k.salida.slice(-900));
+  for (const id of ['E5', 'E6', ...Array.from({ length: 40 }, (_, i) => String(5000 + i))]) (F.personas.delete(id), F.rostros.delete(id));
+
   k = await kit(3);
   const archivo = path.join(TMP, 'lector.config.json');
   const cfg = JSON.parse(fs.readFileSync(archivo, 'utf8'));
