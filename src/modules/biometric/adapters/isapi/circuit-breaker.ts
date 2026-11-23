@@ -68,8 +68,8 @@ export class CircuitBreaker {
   private onFailure() {
     this.failures += 1;
     if (this.state !== 'closed' || this.failures >= this.threshold) {
-      // Enfriamiento exponencial hasta 10 min
-      if (this.state !== 'closed') this.cooldown = Math.min(this.cooldown * 2, 10 * 60_000);
+      // Enfriamiento exponencial hasta 1 min: al volver la luz hay que reconectar enseguida
+      if (this.state !== 'closed') this.cooldown = Math.min(this.cooldown * 2, 60_000);
       this.state = 'open';
       this.openedAt = Date.now();
     }

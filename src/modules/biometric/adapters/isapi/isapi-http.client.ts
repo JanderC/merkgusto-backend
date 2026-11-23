@@ -10,7 +10,17 @@ import { AccessControlError } from '../../contracts/errors.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { DigestAuthenticator, parseDigestChallenge } from './digest-auth.js';
 
+/** Lleva la petición al lector cuando no está en esta red (el puente pone la contraseña). */
+export type Transporte = (req: {
+  method: string;
+  path: string;
+  contentType?: string;
+  body?: Buffer;
+  timeoutMs: number;
+}) => Promise<{ status: number; contentType: string; buffer: Buffer }>;
+
 export interface IsapiClientOptions {
+  transporte?: Transporte;
   baseUrl: string;
   username: string;
   password: string;
@@ -89,8 +99,9 @@ export class IsapiHttpClient {
   static assertOk(res: IsapiResponse, accion: string): void {
     const st = IsapiHttpClient.status(res);
     if (res.status >= 200 && res.status < 300 && (st.statusCode === undefined || st.statusCode === 1)) return;
-    const detalle = st.subStatusCode || st.statusString || st.errorMsg || `HTTP ${res.status}`;
-    throw new AccessControlError('DEVICE_REJECTED', `El lector rechazó "${accion}": ${detalle}`, {
+    const detalle = [st.subStatusCode || st.statusString, st.errorMsg].filter(Boolean).join(' · ') || `HTTP ${res.status}`;
+    // statusCode 2 = ocupado: se reintenta
+    throw new AccessControlError(st.statusCode === 2 || res.status === 503 ? 'DEVICE_ERROR' : 'DEVICE_REJECTED', `El lector rechazó "${accion}": ${detalle}`, {
       httpStatus: res.status,
       subStatusCode: st.subStatusCode,
       statusString: st.statusString,
@@ -118,6 +129,18 @@ export class IsapiHttpClient {
     if (req.json !== undefined) {
       body = JSON.stringify(req.json);
       contentType = 'application/json';
+    }
+
+    if (this.opts.transporte) {
+      const r = await this.opts.transporte({
+        method: req.method,
+        path: req.path,
+        contentType,
+        body: body === undefined ? undefined : Buffer.from(body as string),
+        timeoutMs: req.timeoutMs ?? this.opts.timeoutMs,
+      });
+      if (r.status === 401) throw new AccessControlError('AUTH', 'El lector rechazó la contraseña guardada en el puente', { httpStatus: 401 });
+      return this.interpretar(r.status, r.contentType, r.buffer);
     }
 
     const send = (authorization: string | null) => {
@@ -154,9 +177,11 @@ export class IsapiHttpClient {
       }
     }
 
-    const buffer = Buffer.from(await res.arrayBuffer());
+    return this.interpretar(res.status, res.headers.get('content-type') ?? '', Buffer.from(await res.arrayBuffer()));
+  }
+
+  private interpretar(status: number, ct: string, buffer: Buffer): IsapiResponse {
     const text = buffer.toString('utf8');
-    const ct = res.headers.get('content-type') ?? '';
     let json: Record<string, unknown> | null = null;
     if (ct.includes('json') || text.trimStart().startsWith('{')) {
       try {
@@ -165,13 +190,11 @@ export class IsapiHttpClient {
         json = null;
       }
     }
-    const out: IsapiResponse = { status: res.status, contentType: ct, text, buffer, json };
-    if (res.status >= 500) {
-      throw new AccessControlError('DEVICE_ERROR', `El lector respondió HTTP ${res.status}`, { httpStatus: res.status });
+    const out: IsapiResponse = { status, contentType: ct, text, buffer, json };
+    if (status >= 500) {
+      throw new AccessControlError('DEVICE_ERROR', `El lector respondió HTTP ${status}`, { httpStatus: status });
     }
-    if (res.status === 403) {
-      throw new AccessControlError('AUTH', 'El usuario del lector no tiene permisos para esta operación', { httpStatus: 403 });
-    }
+    // 403 en Hikvision suele ser "notSupport" de ESA función: no es la contraseña ni debe cortar todo lo demás
     return out;
   }
 
@@ -210,7 +233,8 @@ export function extraerJpeg(res: IsapiResponse): Buffer | null {
     const sig = b.indexOf(sep, i + sep.length);
     const parte = b.subarray(i + sep.length, sig === -1 ? b.length : sig);
     const cab = parte.indexOf('\r\n\r\n');
-    if (cab !== -1 && /content-type:\s*image\/jpe?g/i.test(parte.subarray(0, cab).toString('latin1'))) {
+    // Por los primeros bytes: hay firmwares que mandan la foto como application/octet-stream
+    if (cab !== -1 && parte[cab + 4] === 0xff && parte[cab + 5] === 0xd8) {
       let cuerpo = parte.subarray(cab + 4);
       if (cuerpo.subarray(-2).toString('latin1') === '\r\n') cuerpo = cuerpo.subarray(0, -2);
       return cuerpo;

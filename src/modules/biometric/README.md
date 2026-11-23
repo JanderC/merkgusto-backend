@@ -1,4 +1,13 @@
-# Módulo biométrico · Hikvision DS-K1T344 (MinMoe)
+# Módulo biométrico · Hikvision DS-K1T321MFWX (MinMoe)
+
+> Instalación y pruebas con el equipo: [`backend/lector/GUIA.md`](../../../lector/GUIA.md).
+>
+> - `BIOMETRIC_MODE=puente`: backend en la nube; una PC del gimnasio corre `lector/puente.mjs`. Decide el lector.
+> - `BIOMETRIC_MODE=isapi`: backend en la misma red del lector.
+> - El reloj del lector puede volver a 2015 al perder la luz (visto en otro DS-K1T321MFWX, firmware V4.61): se vigila y corrige.
+> - Capacidad: 500 rostros.
+> - Prueba sin hardware: `node scripts/e2e-lector.mjs`. Falta validar con el equipo real: verificación remota,
+>   captura de rostro y códigos de evento exactos del firmware V3.9.2.
 
 ## Capas
 

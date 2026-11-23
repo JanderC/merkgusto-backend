@@ -58,4 +58,7 @@ export interface IAccessControlService {
    * Devuelve un data URL (data:image/jpeg;base64,...).
    */
   captureFace(): Promise<string>;
+
+  /** Abre la puerta una vez. Nunca se reintenta. */
+  openDoor(): Promise<void>;
 }

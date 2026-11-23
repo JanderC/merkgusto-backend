@@ -1,5 +1,5 @@
 /**
- * Adaptador REAL: Hikvision DS-K1T344 (MinMoe) vía ISAPI.
+ * Adaptador REAL: Hikvision DS-K1T321MFWX (MinMoe) vía ISAPI, directo o por el puente.
  */
 import type { IAccessControlService } from '../../contracts/IAccessControlService.js';
 import { AccessControlError } from '../../contracts/errors.js';
@@ -14,9 +14,11 @@ import {
   type FaceSyncDTO,
 } from '../../dto/access-control.dto.js';
 import { StatusTracker } from '../status-tracker.js';
-import { buildMultipart, extraerJpeg, IsapiHttpClient, type IsapiResponse } from './isapi-http.client.js';
+import { buildMultipart, extraerJpeg, IsapiHttpClient, type IsapiResponse, type Transporte } from './isapi-http.client.js';
 import {
   parseDeviceInfoXml,
+  relojMal,
+  toIsapiTimeXml,
   toIsapiAcsCfgRemote,
   toIsapiRemoteCheck,
   toIsapiFaceDelete,
@@ -37,6 +39,7 @@ export interface IsapiServiceConfig {
   retries: number;
   breakerThreshold: number;
   breakerCooldownMs: number;
+  transporte?: Transporte;
 }
 
 const sub = (res: IsapiResponse) => (IsapiHttpClient.status(res).subStatusCode ?? '').toLowerCase();
@@ -47,7 +50,7 @@ export class IsapiAccessControlService implements IAccessControlService {
   private readonly tracker = new StatusTracker('isapi');
 
   constructor(private readonly cfg: IsapiServiceConfig) {
-    if (!cfg.password) {
+    if (!cfg.password && !cfg.transporte) {
       console.warn('⚠ [Biométrico] HIKVISION_PASSWORD vacío: el lector rechazará todas las llamadas');
     }
     this.http = new IsapiHttpClient({
@@ -58,6 +61,7 @@ export class IsapiAccessControlService implements IAccessControlService {
       retries: cfg.retries,
       breakerThreshold: cfg.breakerThreshold,
       breakerCooldownMs: cfg.breakerCooldownMs,
+      transporte: cfg.transporte,
     });
   }
 
@@ -71,6 +75,8 @@ export class IsapiAccessControlService implements IAccessControlService {
       const res = await this.http.request({ method: 'GET', path: '/ISAPI/System/deviceInfo', retry: false });
       IsapiHttpClient.assertOk(res, 'deviceInfo');
       this.tracker.ok(Date.now() - t0, parseDeviceInfoXml(res.text));
+      // Con puente, el reloj lo cuida el puente (funciona aunque no haya internet)
+      if (!this.cfg.transporte) await this.cuidarReloj().catch((e) => console.warn('⚠ [Lector] No se pudo revisar su reloj:', (e as Error).message));
     } catch (e) {
       this.tracker.fail((e as Error).message);
     }
@@ -110,21 +116,30 @@ export class IsapiAccessControlService implements IAccessControlService {
     const face = this.validate(() => faceSyncSchema.parse(input));
     const jpeg = this.validate(() => decodeFaceImage(face.imageBase64));
     const record = JSON.stringify(toIsapiFaceRecord(face.employeeNo, this.cfg.fdid));
+    let campo = 'img';
     const mp = () =>
       buildMultipart([
         { name: 'FaceDataRecord', contentType: 'application/json', data: record },
-        { name: 'img', contentType: 'image/jpeg', data: jpeg, filename: `${face.employeeNo}.jpg` },
+        { name: campo, contentType: 'image/jpeg', data: jpeg, filename: `${face.employeeNo}.jpg` },
       ]);
 
     await this.track(async () => {
-      const a = mp();
-      const res = await this.http.request({
-        method: 'POST',
-        path: '/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json',
-        body: a.body,
-        contentType: a.contentType,
-        timeoutMs: this.cfg.faceTimeoutMs, // el lector modela el rostro: tarda más
-      });
+      const alta = () => {
+        const a = mp();
+        return this.http.request({
+          method: 'POST',
+          path: '/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json',
+          body: a.body,
+          contentType: a.contentType,
+          timeoutMs: this.cfg.faceTimeoutMs, // el lector modela el rostro: tarda más
+        });
+      };
+      let res = await alta();
+      // Según el firmware la foto se llama "img" o "FaceImage"
+      if (/badparameters|badjsoncontent|parameterslack/.test(sub(res))) {
+        campo = 'FaceImage';
+        res = await alta();
+      }
       if (res.status < 300 && IsapiHttpClient.status(res).statusCode === 1) return;
       // Ya tenía rostro → reemplazar con FDSetUp
       if (sub(res).includes('exist')) {
@@ -156,7 +171,30 @@ export class IsapiAccessControlService implements IAccessControlService {
     });
   }
 
+  async openDoor(): Promise<void> {
+    await this.track(async () => {
+      const res = await this.http.request({
+        method: 'PUT',
+        path: `/ISAPI/AccessControl/RemoteControl/door/${this.cfg.doorNo}`,
+        body: '<RemoteControlDoor><cmd>open</cmd></RemoteControlDoor>',
+        contentType: 'application/xml',
+        retry: false,
+      });
+      IsapiHttpClient.assertOk(res, 'abrir puerta');
+    });
+  }
+
+  private async cuidarReloj(): Promise<void> {
+    const res = await this.http.request({ method: 'GET', path: '/ISAPI/System/time', retry: false });
+    IsapiHttpClient.assertOk(res, 'leer reloj');
+    if (!relojMal(res.text, new Date())) return;
+    const put = await this.http.request({ method: 'PUT', path: '/ISAPI/System/time', body: toIsapiTimeXml(new Date()), contentType: 'application/xml', retry: false });
+    IsapiHttpClient.assertOk(put, 'poner en hora');
+    console.log('🕒 [Lector] Reloj corregido');
+  }
+
   async configureEventListener(callbackUrl: string): Promise<void> {
+    if (this.cfg.transporte) throw new AccessControlError('INVALID_INPUT', 'Con el puente no hace falta: él mismo configura el aviso de eventos del lector');
     let url: URL;
     try {
       url = new URL(callbackUrl);
@@ -228,6 +266,7 @@ export class IsapiAccessControlService implements IAccessControlService {
   }
 
   async configureRemoteVerification(enabled: boolean): Promise<void> {
+    if (enabled && this.cfg.transporte) throw new AccessControlError('INVALID_INPUT', 'Con el puente decide el lector, para que abra aunque no haya internet');
     await this.track(async () => {
       const res = await this.http.request({ method: 'PUT', path: '/ISAPI/AccessControl/AcsCfg?format=json', json: toIsapiAcsCfgRemote(enabled) });
       IsapiHttpClient.assertOk(res, 'configurar verificación remota');

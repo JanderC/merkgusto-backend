@@ -1,10 +1,14 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import multer from 'multer';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { db } from '../../db/index.js';
 import { ah, badRequest, notFound, parse } from '../../lib/http.js';
+import { usuarioActual } from '../../middleware/auth.js';
+import { hoy } from '../../lib/util.js';
+import { vigenciaSocio } from '../membresias/membresias.service.js';
+import { estadoPuente } from './puente/puente.service.js';
 import { registrarEventoAcceso } from '../asistencia/asistencia.service.js';
 import { accessControl, mockDevice } from './biometric.factory.js';
 import { EMPLEADO_PREFIJO, encolarEntrenador, encolarSocio, procesarCola, resumenCola } from './biometric-sync.service.js';
@@ -18,10 +22,24 @@ import { isKnownDevice, webhookGuard, webhookStats } from './webhook/webhook.sec
 // ═════════════════════════════════════════════════════════════════════
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 1024 * 1024, fieldSize: 256 * 1024, fields: 10, files: 3 },
+  limits: { fileSize: 4 * 1024 * 1024, fieldSize: 512 * 1024, fields: 10, files: 5 },
 });
 
 let ultimoEvento: { at: string; ip: string; resultado: string } | null = null;
+
+export function anotarEvento(ip: string, resultado: string) {
+  ultimoEvento = { at: new Date().toISOString(), ip, resultado };
+}
+
+/** Hay firmwares que mandan el JSON como archivo adjunto (event_log con filename). */
+function cuerpoEvento(req: Request): unknown {
+  const body: Record<string, unknown> = { ...(req.body ?? {}) };
+  for (const f of (req.files as Express.Multer.File[] | undefined) ?? []) {
+    const texto = f.buffer.subarray(0, 64).toString('utf8').trimStart();
+    if (texto.startsWith('{')) body[f.fieldname] = f.buffer.toString('utf8');
+  }
+  return body;
+}
 
 export const biometricWebhookRouter = Router();
 
@@ -31,10 +49,10 @@ biometricWebhookRouter.post(
   upload.any(), // la foto "Picture" se recibe en memoria y se descarta
   ah(async (req, res) => {
     const ip = (req as typeof req & { sourceIp?: string }).sourceIp ?? '';
-    const r = parseHikEvent(req.body);
+    const r = parseHikEvent(cuerpoEvento(req));
     if (r.kind === 'invalid') {
       console.warn(`⚠ [Webhook biométrico] Evento inválido desde ${ip}: ${r.reason}`);
-      return res.status(400).json({ ok: false });
+      return res.json({ ok: false }); // 200: con un error el lector lo reenvía sin fin y atasca los siguientes
     }
     if (r.kind === 'ignored') return res.json({ ok: true }); // heartBeat y demás
 
@@ -46,7 +64,7 @@ biometricWebhookRouter.post(
 
     try {
       const out = await registrarEventoAcceso(r.event);
-      ultimoEvento = { at: new Date().toISOString(), ip, resultado: out.resultado };
+      anotarEvento(ip, out.resultado);
       // 200 rápido: si no, el lector reintenta (la idempotencia evita duplicados)
       res.json({ ok: true });
     } catch (e) {
@@ -82,6 +100,24 @@ lectorRouter.post(
   }),
 );
 
+/** Apertura manual desde recepción: pide motivo y queda auditada con quién la hizo. */
+lectorRouter.post(
+  '/abrir-puerta',
+  ah(async (req, res) => {
+    const { motivo } = parse(z.object({ motivo: z.string().trim().min(4, 'Escribe por qué abres la puerta').max(200) }), req.body);
+    const auditar = (accion: string) => db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion, detalle: JSON.stringify({ motivo }) }).execute();
+    try {
+      await accessControl.openDoor();
+    } catch (e) {
+      await auditar('puerta.apertura_fallida');
+      if (isAccessControlError(e)) throw badRequest(e.message);
+      throw e;
+    }
+    await auditar('puerta.abierta');
+    res.json({ ok: true });
+  }),
+);
+
 // ═════════════════════════════════════════════════════════════════════
 //  Administración (solo dueño)  /api/biometric/*
 // ═════════════════════════════════════════════════════════════════════
@@ -104,6 +140,7 @@ biometricAdminRouter.get(
       },
       cola: await resumenCola(),
       decision: env.BIOMETRIC_DECISION,
+      puente: env.BIOMETRIC_MODE === 'puente' ? estadoPuente() : null,
       simulador: mock ? { desconectado: mock.isOffline, usuarios: mock.listUsers().length, verificacionRemota: mock.verificacionRemota } : null,
     });
   }),
@@ -167,11 +204,18 @@ biometricAdminRouter.post(
   ah(async (_req, res) => {
     const socios = await db.selectFrom('socios').select(['id']).where('activo', '=', true).execute();
     await db.updateTable('socios').set({ bioEstado: sql`case when foto is null then 'sin_rostro' else 'pendiente' end` as never }).where('activo', '=', true).execute();
-    for (const s of socios) await encolarSocio(s.id);
+    // Al lector solo caben 500 rostros: se cargan los que tienen plan. Los demás entran solos al renovar.
+    let enviados = 0;
+    for (const s of socios) {
+      const v = await vigenciaSocio(s.id, db, { soloLector: true });
+      if (!v.hasta || v.hasta < hoy()) continue;
+      await encolarSocio(s.id);
+      enviados++;
+    }
     const ents = await db.selectFrom('entrenadores').select('id').execute();
     await db.updateTable('entrenadores').set({ bioEstado: sql`case when foto is null then 'sin_rostro' else 'pendiente' end` as never }).where('activo', '=', true).execute();
     for (const e of ents) await encolarEntrenador(e.id);
-    res.json({ encolados: socios.length + ents.length });
+    res.json({ encolados: enviados + ents.length, omitidosSinPlan: socios.length - enviados });
   }),
 );
 

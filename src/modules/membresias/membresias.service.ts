@@ -38,13 +38,17 @@ export function sumarMeses(fecha: string, meses: number): string {
   return `${ny}-${String(nm + 1).padStart(2, '0')}-${String(Math.min(d!, ultimo)).padStart(2, '0')}`;
 }
 
-/** Último día de vigencia (inclusive). */
-export function calcularFin(inicio: string, p: PlanDuracion): string {
+/**
+ * Último día de vigencia (inclusive).
+ * Meses y años van "mes a mes": del 23 de noviembre al 23 de diciembre. Si renueva
+ * continuando, el ancla es el vencimiento anterior (23 dic → 23 ene), así el día no se corre.
+ */
+export function calcularFin(inicio: string, p: PlanDuracion, ancla?: string): string {
   switch (p.tipoDuracion) {
     case 'meses':
-      return sumarDias(sumarMeses(inicio, p.cantidad), -1);
+      return sumarMeses(ancla ?? inicio, p.cantidad);
     case 'anios':
-      return sumarDias(sumarMeses(inicio, p.cantidad * 12), -1);
+      return sumarMeses(ancla ?? inicio, p.cantidad * 12);
     case 'semanas':
       return sumarDias(inicio, p.cantidad * 7 - 1);
     default:
@@ -146,6 +150,7 @@ export async function crearMembresias(
   const desde = args.desde ?? 'continuar';
   // Inicio común: el más tardío de los integrantes si se continúa (nadie pierde días)
   let inicio = args.fechaInicio ?? h;
+  let ancla: string | undefined;
   if (!args.fechaInicio) {
     for (const socioId of args.socioIds) {
       if (desde === 'hoy') {
@@ -165,12 +170,15 @@ export async function crearMembresias(
           .executeTakeFirst();
         if (ult?.fin && ult.fin >= h) {
           const sig = sumarDias(ult.fin, 1);
-          if (sig > inicio) inicio = sig;
+          if (sig > inicio) {
+            inicio = sig;
+            ancla = ult.fin;
+          }
         }
       }
     }
   }
-  const fin = calcularFin(inicio, plan);
+  const fin = calcularFin(inicio, plan, ancla);
   const grupoId = args.socioIds.length > 1 ? crypto.randomUUID() : null;
   const precioPorPersona = Math.round((args.precio / args.socioIds.length) * 100) / 100;
   const creadas = [];

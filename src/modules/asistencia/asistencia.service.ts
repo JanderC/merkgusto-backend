@@ -61,7 +61,7 @@ async function guardarAsistencia(ev: AccessEventDTO, v: { socioId: string | null
       alerta: v.alerta?.slice(0, 200) ?? null,
       dispositivo: ev.deviceId,
       eventoSerial: ev.eventSerial,
-      metodoVerif: ev.verifyMode,
+      metodoVerif: ev.verifyMode?.slice(0, 40) ?? null,
       payload: JSON.stringify(ev.raw),
     })
     .onConflict((oc) => oc.columns(['dispositivo', 'eventoSerial']).where('eventoSerial', 'is not', null).doNothing())
@@ -134,9 +134,11 @@ export async function registrarEventoAcceso(ev: AccessEventDTO): Promise<Resulta
 
   if (ev.remoteCheck) {
     // ── El sistema decide ──
-    const ok = Boolean(socio?.activo && vig?.vigente);
+    const ok = ev.verdict === 'granted' && Boolean(socio?.activo && vig?.vigente);
     resultado = ok ? 'permitido' : 'denegado';
-    motivo = !socio
+    motivo = ev.verdict === 'denied'
+      ? ev.description
+      : !socio
       ? ev.employeeNo ? `Código ${ev.employeeNo} no existe en el sistema` : 'Persona no registrada'
       : !socio.activo
         ? 'Cliente inactivo'

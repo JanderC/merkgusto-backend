@@ -29,7 +29,7 @@ async function main() {
     console.log('══════════════════════════════════════════════════════');
     console.log(`   ✓ API             ${url}/api`);
     console.log(`   ✓ Zona horaria    ${env.TZ} (${new Date().toLocaleString('es-VE')})`);
-    console.log(`   ✓ Biométrico      ${accessControl.mode.toUpperCase()}${accessControl.mode === 'isapi' ? ` → ${env.HIKVISION_HOST}` : ''} · decide: ${env.BIOMETRIC_DECISION}`);
+    console.log(`   ✓ Biométrico      ${env.BIOMETRIC_MODE.toUpperCase()}${env.BIOMETRIC_MODE === 'isapi' ? ` → ${env.HIKVISION_HOST}` : ''} · decide: ${env.BIOMETRIC_DECISION}`);
     console.log(`   ✓ Moneda base     ${env.MONEDA_REFERENCIA} (reportes y finanzas)`);
     console.log(`   ✓ Webhook lector  POST /api/biometric/events/<token>`);
     console.log(`   ✓ WhatsApp        ${env.WHATSAPP_ENABLED ? (env.GROQ_API_KEY ? 'activo con IA (Groq)' : 'activo (respuestas sin IA)') : 'deshabilitado'}`);

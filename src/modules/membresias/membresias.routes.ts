@@ -42,6 +42,7 @@ membresiasRouter.get(
           'p.nombre',
           'p.color',
           'p.accesoLector',
+          'p.tipoDuracion',
           's.codigo',
           's.nombre as socioNombre',
           's.apellido',
@@ -116,7 +117,12 @@ membresiasRouter.get(
         hasta: v.hasta ?? v.ultimaFin,
         diasRestantes: dentro ? v.diasRestantes : 0,
         diasVencida: estado === 'vencida' && v.ultimaFin ? diasEntre(v.ultimaFin, h) : null,
-        proximoPago: v.hasta ? sumarDias(v.hasta, 1) : v.ultimaFin ? sumarDias(v.ultimaFin, 1) : null,
+        // Mes a mes se paga el mismo día del mes en que vence (23 → 23); por días, al día siguiente
+        proximoPago: (() => {
+          const fin = v.hasta ?? v.ultimaFin;
+          if (!fin) return null;
+          return a.tipoDuracion === 'meses' || a.tipoDuracion === 'anios' ? fin : sumarDias(fin, 1);
+        })(),
         congeladaDesde: v.congelada?.desde ?? null,
         diasCongelada: v.congelada?.dias ?? null,
         membresiaCongeladaId: v.congelada?.membresiaId ?? null,

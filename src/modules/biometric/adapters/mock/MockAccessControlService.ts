@@ -174,6 +174,12 @@ export class MockAccessControlService implements IAccessControlService {
     return this.remota;
   }
 
+  async openDoor(): Promise<void> {
+    await this.call(async () => {
+      console.log('🧪 [Biométrico simulado] Puerta abierta');
+    });
+  }
+
   async configureEventListener(callbackUrl: string): Promise<void> {
     await this.call(async () => {
       console.log(`🧪 [Biométrico simulado] Listening Host configurado → ${callbackUrl}`);

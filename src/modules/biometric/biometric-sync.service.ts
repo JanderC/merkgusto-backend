@@ -11,6 +11,7 @@
  * día pagado 23:59:59. Así el propio lector rechaza al socio vencido aunque el
  * servidor esté caído. Además, el job nocturno re-sincroniza a quien venció.
  */
+import fs from 'node:fs';
 import { sql } from 'kysely';
 import { db, type Db } from '../../db/index.js';
 import { hoy, sumarDias } from '../../lib/util.js';
@@ -22,6 +23,21 @@ import type { AccessUserDTO } from './dto/access-control.dto.js';
 type Operacion = 'sync_usuario' | 'sync_rostro' | 'eliminar';
 
 const MAX_INTENTOS = 12;
+/** Sin conexión (PC apagada, sin luz, sin internet, clave cambiada) NUNCA se descarta: se espera. */
+const ESPERAR_SIEMPRE = ['TIMEOUT', 'UNREACHABLE', 'CIRCUIT_OPEN', 'AUTH'];
+
+/** La foto que entrega el simulador no es de la persona: jamás debe llegar a un lector real. */
+let fotoSimulada: string | undefined;
+function esFotoSimulada(foto: string) {
+  if (fotoSimulada === undefined) {
+    try {
+      fotoSimulada = fs.readFileSync(new URL('../../../assets/rostro-simulado.jpg', import.meta.url)).toString('base64');
+    } catch {
+      fotoSimulada = '';
+    }
+  }
+  return !!fotoSimulada && foto.endsWith(fotoSimulada);
+}
 const LOTE = 10;
 
 /** Agrega (o reactiva) una operación pendiente para el socio. */
@@ -193,6 +209,7 @@ async function procesarLote(): Promise<number> {
           await accessControl.upsertUser(ficha);
           if (f.operacion === 'sync_rostro') {
             if (!f.foto) throw new Error('El cliente no tiene foto');
+            if (accessControl.mode === 'isapi' && esFotoSimulada(f.foto)) throw new Error('La foto es la del lector simulado: tómale la foto real con el lector');
             await accessControl.upsertFace({ employeeNo: ficha.employeeNo, imageBase64: f.foto });
           }
         }
@@ -215,9 +232,11 @@ async function procesarLote(): Promise<number> {
       } catch (e) {
         const msg = (e as Error).message;
         const reintentar = isAccessControlError(e) ? e.retryable : false;
+        const sinConexion = isAccessControlError(e) && ESPERAR_SIEMPRE.includes(e.code);
         const intentos = f.intentos + 1;
-        const descartar = !reintentar || intentos >= MAX_INTENTOS;
-        const esperaSeg = Math.min(15 * 2 ** (intentos - 1), 30 * 60); // 15s, 30s, 1m … máx 30 min
+        const descartar = !sinConexion && (!reintentar || intentos >= MAX_INTENTOS);
+        // Sin conexión: máx. 1 min, para que al volver la renovación entre enseguida. Otros fallos: hasta 30 min
+        const esperaSeg = Math.min(15 * 2 ** Math.min(intentos - 1, 10), sinConexion ? 60 : 30 * 60);
         await db
           .updateTable('bioCola')
           .set({
@@ -244,7 +263,7 @@ async function procesarLote(): Promise<number> {
             .execute();
         }
         // Si el lector se cayó no seguimos golpeándolo en este lote
-        if (isAccessControlError(e) && ['TIMEOUT', 'UNREACHABLE', 'CIRCUIT_OPEN', 'AUTH'].includes(e.code)) {
+        if (sinConexion) {
           repetir = false;
           break;
         }

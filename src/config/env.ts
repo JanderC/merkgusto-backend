@@ -71,8 +71,11 @@ const schema = z.object({
   GROQ_API_KEY: z.string().default(''),
   GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
 
-  // ── Control de acceso biométrico (Hikvision DS-K1T344 · MinMoe) ──
-  BIOMETRIC_MODE: z.enum(['mock', 'isapi', 'disabled']).default('mock'),
+  // ── Control de acceso biométrico (Hikvision DS-K1T321MFWX · MinMoe) ──
+  // isapi  → el servidor está en la misma red del lector
+  // puente → el servidor está en la nube y una PC del gimnasio hace de puente (backend/lector)
+  BIOMETRIC_MODE: z.enum(['mock', 'isapi', 'puente', 'disabled']).default('mock'),
+  BIOMETRIC_PUENTE_TOKEN: z.union([z.literal(''), z.string().min(32, 'BIOMETRIC_PUENTE_TOKEN debe tener al menos 32 caracteres')]).default(''),
   /**
    * servidor → verificación remota: el lector consulta al sistema y el sistema decide si abre (recomendado)
    * lector   → el lector decide con la vigencia que se le sincroniza y solo informa el evento
@@ -107,6 +110,14 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+if (env.BIOMETRIC_MODE === 'puente') {
+  if (!env.BIOMETRIC_PUENTE_TOKEN) {
+    console.error('❌ BIOMETRIC_MODE=puente necesita BIOMETRIC_PUENTE_TOKEN (lo genera el kit del lector)');
+    process.exit(1);
+  }
+  // A través de internet no se puede responder "¿abro?" a tiempo ni sin conexión: decide el lector
+  env.BIOMETRIC_DECISION = 'lector';
+}
 export const isProd = env.NODE_ENV === 'production';
 
 /** Carpeta raíz de datos del servidor (backend/storage por defecto). */

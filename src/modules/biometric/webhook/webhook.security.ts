@@ -76,7 +76,7 @@ export function isKnownDevice(mac: string | null, ip: string | null): { ok: bool
   return { ok: true };
 }
 
-// Límite simple en memoria: 120 eventos/minuto por IP (un lector real envía muchos menos)
+// Límite simple en memoria: 600 eventos/minuto por IP (al reconectar, el lector descarga los atrasados de golpe)
 const hits = new Map<string, { n: number; t: number }>();
 function rateLimited(ip: string): boolean {
   const now = Date.now();
@@ -86,7 +86,7 @@ function rateLimited(ip: string): boolean {
     return false;
   }
   h.n += 1;
-  return h.n > 120;
+  return h.n > 600;
 }
 
 let rechazos = 0;

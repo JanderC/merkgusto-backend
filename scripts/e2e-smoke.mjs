@@ -102,10 +102,10 @@ const v2 = await call('POST', '/pos/ventas', { socioId: s1.id, items: [{ tipo: '
   { metodo: 'bancolombia', moneda: 'COP', monto: 12.5 * T.usdCop, referencia: 'BC-9' },
 ] }, C);
 check(v2.s === 201, 'plan $25: mitad en Bs y mitad por Bancolombia en COP', v2.j);
-check(v2.j?.membresias?.[0]?.fechaInicio === H && v2.j?.membresias?.[0]?.fechaFin === sumarDias(sumarMeses(H, 1), -1), 'mes a mes: vence el día anterior del mismo día del mes siguiente', v2.j?.membresias);
+check(v2.j?.membresias?.[0]?.fechaInicio === H && v2.j?.membresias?.[0]?.fechaFin === sumarMeses(H, 1), 'mes a mes: del 23 al 23 del mes siguiente', v2.j?.membresias);
 const v3 = await call('POST', '/pos/ventas', { socioId: s1.id, items: [{ tipo: 'membresia', id: mensual.id }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 30 }], vuelto: { metodo: 'efectivo', moneda: 'COP', monto: 5 * T.usdCop } }, C);
 check(v3.s === 201 && v3.j.vuelto?.texto === 'COP 16.500', 'renovación con $30 y vuelto COP 16.500', v3.j);
-check(v3.j?.membresias?.[0]?.fechaInicio === sumarMeses(H, 1), 'la renovación continúa al día siguiente del vencimiento', v3.j?.membresias);
+check(v3.j?.membresias?.[0]?.fechaInicio === sumarDias(sumarMeses(H, 1), 1) && v3.j?.membresias?.[0]?.fechaFin === sumarMeses(H, 2), 'la renovación sigue mes a mes sin correr el día (23 → 23)', v3.j?.membresias);
 const vDuo1 = await call('POST', '/pos/ventas', { socioId: s2.id, items: [{ tipo: 'membresia', id: duo.id }], pagos: [{ metodo: 'zelle', moneda: 'USD', monto: 40, referencia: 'z1' }] }, C);
 check(vDuo1.s === 400, 'plan dúo exige acompañante', vDuo1.j);
 const vDuo = await call('POST', '/pos/ventas', { socioId: s2.id, items: [{ tipo: 'membresia', id: duo.id, acompanantes: [s3.id] }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 40 }] }, C);
@@ -193,7 +193,7 @@ await call('POST', '/pos/ventas', { socioId: s6.id, items: [{ tipo: 'membresia',
 await call('POST', '/pos/ventas', { socioId: s7.id, items: [{ tipo: 'membresia', id: pK.id }], pagos: [{ metodo: 'efectivo', moneda: 'USD', monto: 20 }] }, C);
 const usoM = (await call('GET', `/planes/${pM.id}/uso`, null, D)).j;
 const vM = usoM.vigentes.find((v) => v.socioId === s6.id);
-check(vM && vM.desde === H && vM.hasta === sumarDias(sumarMeses(H, 1), -1) && vM.telefono === '04140000006' && vM.diasRestantes > 27, 'uso del plan: cliente vigente con su fecha de pago y vencimiento', usoM);
+check(vM && vM.desde === H && vM.hasta === sumarMeses(H, 1) && vM.telefono === '04140000006' && vM.diasRestantes > 27, 'uso del plan: cliente vigente con su fecha de pago y vencimiento', usoM);
 check((await call('GET', `/planes/${pM.id}/uso`, null, C)).s === 403, 'la cajera no ve ni elimina planes');
 const sinModo = await call('DELETE', `/planes/${pM.id}`, {}, D);
 check(sinModo.s === 409 && /1 cliente/.test(sinModo.j.message), 'con clientes vigentes pide decidir qué pasa con ellos', sinModo.j);

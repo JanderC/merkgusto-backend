@@ -20,6 +20,7 @@ import { asistenciaRouter } from './modules/asistencia/asistencia.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { biometricAdminRouter, biometricWebhookRouter, lectorRouter } from './modules/biometric/biometric.routes.js';
 import { cajaDuenoRouter, posRouter } from './modules/caja/caja.routes.js';
+import { puenteRouter } from './modules/biometric/puente/puente.routes.js';
 import { configRouter } from './modules/configuracion/config.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { planesRouter, productosRouter } from './modules/planes/planes.routes.js';
@@ -61,6 +62,8 @@ export function createApp() {
   });
 
   api.use('/auth', authRouter);
+  // Puente del lector: la PC del gimnasio, con su propia clave
+  api.use('/puente', puenteRouter);
   // Portal del cliente: enlace personal, sin sesión (solo lectura)
   api.use('/portal', portalRouter);
   // App del cliente (cédula + clave opcional, o su enlace) y app de entrenadores

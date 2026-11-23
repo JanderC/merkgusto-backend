@@ -1,7 +1,7 @@
 /**
  * Convierte lo que envía el lector en un AccessEventDTO validado.
  *
- * El DS-K1T344 envía los eventos del Listening Host como multipart/form-data:
+ * El lector envía los eventos del Listening Host como multipart/form-data:
  *   • una parte de texto (normalmente "event_log" o "AccessControllerEvent")
  *     con el JSON del evento
  *   • opcionalmente una parte "Picture" con la foto capturada (se descarta)
@@ -10,7 +10,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import type { AccessEventDTO } from '../dto/access-control.dto.js';
-import { classifyAccessEvent } from '../adapters/isapi/isapi.mappers.js';
+import { classifyAccessEvent, FALLOS_IDENTIDAD } from '../adapters/isapi/isapi.mappers.js';
 
 const accessControllerEventSchema = z
   .object({
@@ -64,7 +64,7 @@ export type ParseResult =
   | { kind: 'ignored'; reason: string }
   | { kind: 'invalid'; reason: string };
 
-export function parseHikEvent(body: unknown, opts: { simulated?: boolean } = {}): ParseResult {
+export function parseHikEvent(body: unknown, opts: { simulated?: boolean; recibidoEn?: Date } = {}): ParseResult {
   const raw = extractEnvelope(body);
   if (!raw) return { kind: 'invalid', reason: 'No se encontró el JSON del evento' };
   const parsed = hikEventEnvelopeSchema.safeParse(raw);
@@ -78,20 +78,28 @@ export function parseHikEvent(body: unknown, opts: { simulated?: boolean } = {})
   const remoteCheck = ace.remoteCheck === true || ace.remoteCheck === 'true';
   const clasif = classifyAccessEvent(ace.majorEventType, ace.subEventType);
   // En verificación remota el veredicto lo damos nosotros, aunque el sub-evento sea desconocido
-  const verdict = remoteCheck ? 'granted' : clasif.verdict;
-  const label = remoteCheck ? 'Consulta de acceso del lector' : clasif.label;
+  const fallo = ace.majorEventType === 5 && FALLOS_IDENTIDAD.has(ace.subEventType);
+  const verdict = remoteCheck ? (fallo ? 'denied' : 'granted') : clasif.verdict;
+  const label = remoteCheck && !fallo ? 'Consulta de acceso del lector' : clasif.label;
+  // Un código nuevo con persona identificada no puede perderse en silencio
+  if (verdict === 'other' && ace.majorEventType === 5 && ace.employeeNoString) {
+    console.warn(`⚠ [Lector] Código de evento sin clasificar: 5/${ace.subEventType}`);
+  }
   if (verdict === 'other') return { kind: 'ignored', reason: label };
 
-  const occurredAt = new Date(env.dateTime);
-  if (Number.isNaN(occurredAt.getTime())) return { kind: 'invalid', reason: 'dateTime inválido' };
+  const horaLector = new Date(env.dateTime);
+  if (Number.isNaN(horaLector.getTime())) return { kind: 'invalid', reason: 'dateTime inválido' };
+  // Reloj reiniciado (2015) o adelantado: vale la hora en que llegó el evento
+  const recibido = opts.recibidoEn ?? new Date();
+  const occurredAt = horaLector.getFullYear() < 2020 || horaLector.getTime() > recibido.getTime() + 86_400_000 ? recibido : horaLector;
 
   const employeeNoRaw = ace.employeeNoString ?? (ace.employeeNo !== undefined ? String(ace.employeeNo) : '');
   const employeeNo = /^[A-Za-z0-9]{1,32}$/.test(employeeNoRaw) ? employeeNoRaw : null;
   const deviceId = (env.macAddress || env.ipAddress || 'desconocido').toLowerCase();
-  // serialNo es único por equipo; si faltara se deriva un hash estable del evento
+  // serialNo vuelve a empezar al restaurar el equipo: se combina con su hora. Si falta, hash estable del evento
   const eventSerial =
     ace.serialNo !== undefined
-      ? String(ace.serialNo)
+      ? `${ace.serialNo}-${Math.floor(horaLector.getTime() / 1000)}`
       : crypto.createHash('sha1').update(`${env.dateTime}|${employeeNo}|${ace.subEventType}`).digest('hex').slice(0, 24);
 
   return {

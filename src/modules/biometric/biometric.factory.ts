@@ -1,6 +1,6 @@
 /**
  * Punto único de creación del servicio de control de acceso.
- * BIOMETRIC_MODE = mock | isapi | disabled
+ * BIOMETRIC_MODE = mock | isapi | puente | disabled
  */
 import path from 'node:path';
 import { env, STORAGE_DIR } from '../../config/env.js';
@@ -8,6 +8,7 @@ import type { IAccessControlService } from './contracts/IAccessControlService.js
 import { AccessControlError } from './contracts/errors.js';
 import type { DeviceStatusDTO } from './dto/access-control.dto.js';
 import { IsapiAccessControlService } from './adapters/isapi/IsapiAccessControlService.js';
+import { transportePuente } from './puente/puente.service.js';
 import { MockAccessControlService } from './adapters/mock/MockAccessControlService.js';
 
 class DisabledAccessControlService implements IAccessControlService {
@@ -35,11 +36,13 @@ class DisabledAccessControlService implements IAccessControlService {
   respondRemoteCheck = this.off;
   configureRemoteVerification = this.off;
   captureFace = this.off;
+  openDoor = this.off;
 }
 
 function create(): IAccessControlService {
   switch (env.BIOMETRIC_MODE) {
     case 'isapi':
+    case 'puente':
       return new IsapiAccessControlService({
         host: env.HIKVISION_HOST,
         username: env.HIKVISION_USER,
@@ -51,6 +54,7 @@ function create(): IAccessControlService {
         retries: env.HIKVISION_RETRIES,
         breakerThreshold: env.HIKVISION_BREAKER_THRESHOLD,
         breakerCooldownMs: env.HIKVISION_BREAKER_COOLDOWN_MS,
+        transporte: env.BIOMETRIC_MODE === 'puente' ? transportePuente : undefined,
       });
     case 'mock': {
       const mock = new MockAccessControlService({
