@@ -265,7 +265,9 @@ check(foto.status === 200 && (foto.headers.get('content-type') ?? '').includes('
 const per = await call('POST', '/entrenadores/permisos/solicitar', { entrenadorId: ent.j.id, pin: '4321', tipo: 'diligencia', desde: `${sumarDias(H, 1)}T08:00`, hasta: `${sumarDias(H, 1)}T12:00`, motivo: 'Trámite bancario', soporte: jpeg }, C);
 check(per.s === 201 && per.j.estado === 'pendiente', 'entrenador solicita permiso con soporte', per.j);
 check((await call('POST', `/entrenadores/permisos/${per.j.id}/resolver`, { estado: 'aprobado' }, A)).s === 200, 'admin aprueba el permiso');
-await espera(2000);
+// El lector simulado recibe ficha y rostro por la cola (en dos pasos): se espera a que tenga los dos (hasta 20 s)
+const codigoE = `E${(await call('GET', '/entrenadores', null, D)).j.find((e) => e.id === ent.j.id).codigo}`;
+for (let i = 0; i < 40 && !(await call('GET', '/biometric/simulador/usuarios', null, D)).j.some((u) => u.employeeNo === codigoE && u.hasFace); i++) await espera(500);
 const escE = await call('POST', '/biometric/simulador/escanear', { entrenadorId: ent.j.id }, D);
 check(escE.j.puerta === 'abierta' && escE.j.resultado.entrenador?.marco === 'regreso', 'entrenador en el lector: abre y marca regreso', escE.j.resultado);
 const rep = (await call('GET', `/entrenadores/reporte?desde=${H}&hasta=${H}`, null, A)).j.find((r) => r.id === ent.j.id);

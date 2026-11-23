@@ -10,8 +10,26 @@ import { crearLector, dormir, escuchar, ipHacia, ponerAviso, revisarReloj } from
 
 const DIR = process.env.LECTOR_DIR ?? path.dirname(fileURLToPath(import.meta.url));
 const ARCHIVO = path.join(DIR, 'lector.config.json');
+const LOG = path.join(DIR, 'puente.log');
+
+/** Pantalla + archivo: corriendo por debajo (tarea de Windows) no hay ventana, el log cuenta qué pasó. */
+function log(texto) {
+  const linea = `[${new Date().toLocaleString('es-VE')}] ${texto}`;
+  console.log(linea);
+  try {
+    if (fs.existsSync(LOG) && fs.statSync(LOG).size > 1024 * 1024) fs.renameSync(LOG, `${LOG}.1`);
+    fs.appendFileSync(LOG, `${linea}
+`);
+  } catch {
+    /* sin disco no se detiene el puente */
+  }
+}
+// Un error inesperado cierra el proceso a propósito: la tarea de Windows lo vuelve a abrir
+process.on('uncaughtException', (e) => (log(`ERROR inesperado: ${e.stack ?? e}`), process.exit(1)));
+process.on('unhandledRejection', (e) => (log(`ERROR inesperado: ${e?.stack ?? e}`), process.exit(1)));
+
 if (!fs.existsSync(ARCHIVO)) {
-  console.log('Falta configurar: abre LECTOR.bat y elige la opción 3.');
+  log('Falta configurar: abre LECTOR.bat y elige la opción 3.');
   process.exit(1);
 }
 const cfg = JSON.parse(fs.readFileSync(ARCHIVO, 'utf8'));
@@ -37,7 +55,7 @@ const anterior = new Map();
 function avisar(tema, texto) {
   if (anterior.get(tema) === texto) return;
   anterior.set(tema, texto);
-  console.log(`[${new Date().toLocaleTimeString()}] ${tema}: ${texto}`);
+  log(`${tema}: ${texto}`);
 }
 
 async function sistema(ruta, body, timeout = 15000) {
@@ -94,7 +112,7 @@ async function guardarEvento(evento) {
   const destino = path.join(COLA, `${Date.now()}-${String(++n).padStart(6, '0')}-${crypto.randomBytes(3).toString('hex')}.json`);
   fs.writeFileSync(`${destino}.tmp`, JSON.stringify({ recibidoEn: new Date().toISOString(), evento }));
   fs.renameSync(`${destino}.tmp`, destino);
-  if (a.employeeNoString) console.log(`[${new Date().toLocaleTimeString()}] lector: persona ${a.employeeNoString} · evento ${a.subEventType}`);
+  if (a.employeeNoString) log(`lector: persona ${a.employeeNoString} · evento ${a.subEventType}`);
 }
 
 async function bucleEventos() {
@@ -123,6 +141,7 @@ async function bucleLector() {
   let avisadoA = '';
   let cuando = 0;
   for (;;) {
+    let conectado = true;
     try {
       const reloj = await revisarReloj(lector, { corregir: true });
       avisar('reloj', reloj.ok ? (reloj.corregido ? reloj.detalle : 'en hora') : reloj.detalle);
@@ -137,20 +156,22 @@ async function bucleLector() {
         }
       }
     } catch (e) {
-      avisar('lector', `SIN CONEXIÓN con ${cfg.lector.ip} (${e.cause?.code ?? e.message})`);
+      avisar('lector', `SIN CONEXIÓN con ${cfg.lector.ip} (${e.cause?.code ?? e.message}). Reintentando…`);
       avisadoA = '';
+      conectado = false;
     }
-    await dormir(cfg.revisarCadaMs ?? 20000);
+    // Caído: se reintenta cada 5 s para reconectar apenas vuelva
+    await dormir(conectado ? (cfg.revisarCadaMs ?? 20000) : 5000);
   }
 }
 
 try {
   await escuchar({ puerto: cfg.puertoLocal, ruta: cfg.ruta, ipLector: cfg.lector.ip, alRecibir: guardarEvento, alRechazar: (m) => avisar('rechazado', m) });
 } catch (e) {
-  console.log(e.code === 'EADDRINUSE' ? 'El puente ya está abierto en otra ventana.' : e.message);
+  log(e.code === 'EADDRINUSE' ? 'El puente ya está corriendo (en otra ventana o por debajo como tarea de Windows).' : e.message);
   process.exit(2);
 }
-console.log('PUENTE DEL LECTOR · MERKGUSTO GYM · no cierres esta ventana');
+log('PUENTE DEL LECTOR · MERKGUSTO GYM · iniciado');
 void buclePedidos();
 void bucleEventos();
 void bucleLector();

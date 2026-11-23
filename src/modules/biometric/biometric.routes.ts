@@ -100,12 +100,43 @@ lectorRouter.post(
   }),
 );
 
-/** Apertura manual desde recepción: pide motivo y queda auditada con quién la hizo. */
+/**
+ * Apertura manual desde recepción, siempre auditada con quién la hizo:
+ *  • con motivo escrito (visita, técnico…), o
+ *  • para un cliente que entra por recepción (pase diario / rutina): debe tener plan vigente
+ *    y su entrada registrada en los últimos 30 minutos.
+ */
 lectorRouter.post(
   '/abrir-puerta',
   ah(async (req, res) => {
-    const { motivo } = parse(z.object({ motivo: z.string().trim().min(4, 'Escribe por qué abres la puerta').max(200) }), req.body);
-    const auditar = (accion: string) => db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion, detalle: JSON.stringify({ motivo }) }).execute();
+    const b = parse(
+      z.union([
+        z.object({ socioId: z.string().uuid() }),
+        z.object({ motivo: z.string({ required_error: 'Escribe por qué abres la puerta' }).trim().min(4, 'Escribe por qué abres la puerta').max(200) }),
+      ]),
+      req.body,
+    );
+    let motivo: string;
+    let socioId: string | null = null;
+    if ('socioId' in b) {
+      const s = await db.selectFrom('socios').select(['id', 'nombre', 'apellido', 'activo']).where('id', '=', b.socioId).executeTakeFirst();
+      if (!s) throw notFound('Cliente no encontrado');
+      const v = await vigenciaSocio(s.id);
+      if (!s.activo || !v.vigente) throw badRequest(`${s.nombre} no tiene un plan vigente: cobra primero`);
+      const entro = await db
+        .selectFrom('asistencias')
+        .select('id')
+        .where('socioId', '=', s.id)
+        .where('resultado', '=', 'permitido')
+        .where('fechaHora', '>', sql<Date>`now() - interval '30 minutes'`)
+        .executeTakeFirst();
+      if (!entro) throw badRequest(`Registra primero la entrada de ${s.nombre}`);
+      socioId = s.id;
+      motivo = `Entrada de ${`${s.nombre} ${s.apellido}`.trim()} · ${v.plan ?? 'plan'}`;
+    } else {
+      motivo = b.motivo;
+    }
+    const auditar = (accion: string) => db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion, detalle: JSON.stringify({ motivo, socioId }) }).execute();
     try {
       await accessControl.openDoor();
     } catch (e) {

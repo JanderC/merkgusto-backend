@@ -69,11 +69,16 @@ no entra vencido, entra renovado, apertura desde la PC y corte de luz. Al final 
 Las fotos tomadas mientras el sistema estaba en modo simulado no son reales. El sistema
 no las manda al lector: salen con error en la cola y hay que repetirlas.
 
-### 5. Que arranque solo
+### 5. Que corra solo, por debajo
 
-1. `Win+R`, escribe `shell:startup` y pon ahí un acceso directo a `PUENTE.bat`.
-2. En Energía, Suspender: Nunca.
-3. Reinicia la PC y comprueba que el puente abre.
+1. Haz doble clic en `INSTALAR-PUENTE.bat` y acepta el permiso de administrador.
+2. Desde ese momento el puente:
+   - arranca solo al prender la PC, sin ventana y aunque nadie inicie sesión;
+   - se vuelve a abrir solo si se cierra;
+   - impide que la PC se duerma mientras esté conectada a la corriente.
+3. Ya no abras `PUENTE.bat`.
+4. `ESTADO-PUENTE.bat` muestra si está corriendo y sus últimos mensajes, que también quedan en `puente.log`.
+5. Para quitarlo: `QUITAR-PUENTE.bat`.
 
 ## Si algo falla
 
@@ -87,6 +92,7 @@ no las manda al lector: salen con error en la cola y hay que repetirlas.
 | Foto rechazada | De frente, buena luz, sin gorra ni lentes, una sola cara, menos de 200 KB. |
 | No reconoce bien | Evita sol directo o luz detrás de la persona; distancia de 0,3 a 1,5 m. |
 | `sistema: la clave del puente no coincide` | Repite la opción 3 y vuelve a copiar la variable. |
+| El lector «se cae» a ratos | Mira `ESTADO-PUENTE.bat`. Si dice `SIN CONEXIÓN con 192.168.1.20`, casi siempre es otro aparato con la misma IP: reserva la IP del lector en el router. |
 | `el servidor no tiene el puente activado` | Falta `BIOMETRIC_MODE=puente` o desplegar la versión nueva. |
 
 ## Límites que debes conocer

@@ -96,7 +96,7 @@ export class DigestAuthenticator {
       `algorithm=${ch.algorithm}`,
       `response="${response}"`,
     ];
-    if (ch.opaque) parts.push(`opaque="${ch.opaque}"`);
+    if (ch.opaque !== undefined) parts.push(`opaque="${ch.opaque}"`);
     if (qop) parts.push(`qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
     return `Digest ${parts.join(', ')}`;
   }

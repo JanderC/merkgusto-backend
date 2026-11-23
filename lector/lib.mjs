@@ -32,7 +32,8 @@ export function crearLector({ ip, puerto = 80, usuario = 'admin', clave }) {
       `algorithm=${algorithm}`,
       `response="${auth ? H(`${a1}:${nonce}:${cuenta}:${cnonce}:auth:${a2}`) : H(`${a1}:${nonce}:${a2}`)}"`,
     ];
-    if (opaque) partes.push(`opaque="${opaque}"`);
+    // Este lector manda opaque="": se devuelve aunque esté vacío, como hace curl
+    if (opaque !== undefined) partes.push(`opaque="${opaque}"`);
     if (auth) partes.push('qop=auth', `nc=${cuenta}`, `cnonce="${cnonce}"`);
     return `Digest ${partes.join(', ')}`;
   }
