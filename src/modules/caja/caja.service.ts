@@ -20,6 +20,7 @@ import { sql } from 'kysely';
 import { db, type Db } from '../../db/index.js';
 import type { Moneda } from '../../db/types.js';
 import { bus } from '../../lib/events.js';
+import { hoy, sumarDias } from '../../lib/util.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/http.js';
 import { convertir, fmt, fmtTodas, INFO, MONEDA_REF, MONEDAS, redondear, totalesPorMoneda, type Tasas } from '../../lib/monedas.js';
 import { encolarSocio } from '../biometric/biometric-sync.service.js';
@@ -29,7 +30,7 @@ import { moverStock } from '../inventario/kardex.js';
 import { getTasas } from '../tasas/tasas.service.js';
 
 export type ItemVentaInput =
-  | { tipo: 'membresia'; id: number; acompanantes?: string[]; desde?: DesdeRenovacion }
+  | { tipo: 'membresia'; id: number; acompanantes?: string[]; desde?: DesdeRenovacion; /** Se inscribió días antes: la mensualidad cuenta desde ese día */ inicio?: string }
   | { tipo: 'producto'; id: number; cantidad: number }
   | { tipo: 'abono'; deudaId: number; monto: number };
 
@@ -97,7 +98,7 @@ export async function registrarVenta(
 
     // ── 1. Líneas: precios SIEMPRE desde la base de datos, cada una en su moneda ──
     const lineas: Linea[] = [];
-    const membresiasPedidas: Array<{ planId: number; socios: string[]; desde: DesdeRenovacion; idx: number }> = [];
+    const membresiasPedidas: Array<{ planId: number; socios: string[]; desde: DesdeRenovacion; inicio?: string; idx: number }> = [];
     const abonos: Array<{ deudaId: number; monto: number }> = [];
     for (const it of input.items) {
       if (it.tipo === 'membresia') {
@@ -106,7 +107,11 @@ export async function registrarVenta(
         if (!p || !p.activo) throw badRequest('Plan no disponible');
         const socios = [input.socioId, ...(it.acompanantes ?? [])];
         if (socios.length !== p.personas) throw badRequest(`El plan ${p.nombre} es para ${p.personas} persona(s): elige ${p.personas - 1} acompañante(s)`);
-        membresiasPedidas.push({ planId: p.id, socios, desde: it.desde ?? 'continuar', idx: lineas.length });
+        if (it.inicio) {
+          if (it.inicio > hoy()) throw badRequest('La fecha de inicio no puede ser futura');
+          if (it.inicio < sumarDias(hoy(), -30)) throw badRequest('La fecha de inicio puede ser como máximo de hace 30 días');
+        }
+        membresiasPedidas.push({ planId: p.id, socios, desde: it.desde ?? 'continuar', inicio: it.inicio, idx: lineas.length });
         lineas.push({
           tipo: 'membresia',
           referenciaId: p.id,
@@ -115,7 +120,7 @@ export async function registrarVenta(
           moneda: p.moneda,
           precioUnitario: Number(p.precio),
           subtotal: Number(p.precio),
-          datos: { socios, desde: it.desde ?? 'continuar' },
+          datos: { socios, desde: it.desde ?? 'continuar', ...(it.inicio && { inicio: it.inicio }) },
         });
       } else if (it.tipo === 'producto') {
         const p = await trx.selectFrom('productos').selectAll().where('id', '=', it.id).forUpdate().executeTakeFirst();
@@ -278,7 +283,7 @@ export async function registrarVenta(
     const membresias: Array<{ socioIds: string[]; inicio: string; fin: string; plan: string }> = [];
     for (const mp of membresiasPedidas) {
       const l = lineas[mp.idx]!;
-      const c = await crearMembresias(trx, { socioIds: mp.socios, planId: mp.planId, ventaId: venta.id, precio: l.subtotal, moneda: l.moneda, desde: mp.desde });
+      const c = await crearMembresias(trx, { socioIds: mp.socios, planId: mp.planId, ventaId: venta.id, precio: l.subtotal, moneda: l.moneda, desde: mp.desde, inicio: mp.inicio });
       membresias.push({ socioIds: mp.socios, inicio: c.inicio, fin: c.fin, plan: c.plan.nombre });
     }
     // Pago parcial → deuda del cliente

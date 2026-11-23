@@ -138,7 +138,7 @@ export type DesdeRenovacion = 'continuar' | 'hoy';
  */
 export async function crearMembresias(
   trx: Db,
-  args: { socioIds: string[]; planId: number; ventaId: string | null; precio: number; moneda: Moneda; desde?: DesdeRenovacion; fechaInicio?: string; nota?: string | null },
+  args: { socioIds: string[]; planId: number; ventaId: string | null; precio: number; moneda: Moneda; desde?: DesdeRenovacion; fechaInicio?: string; inicio?: string; nota?: string | null },
 ) {
   const plan = await trx.selectFrom('planes').selectAll().where('id', '=', args.planId).executeTakeFirst();
   if (!plan) throw notFound('Plan no encontrado');
@@ -149,9 +149,10 @@ export async function crearMembresias(
   const h = hoy();
   const desde = args.desde ?? 'continuar';
   // Inicio común: el más tardío de los integrantes si se continúa (nadie pierde días)
-  let inicio = args.fechaInicio ?? h;
+  // inicio: fecha real en que empezó (se inscribió días antes). fechaInicio: uso administrativo
+  let inicio = args.fechaInicio ?? args.inicio ?? h;
   let ancla: string | undefined;
-  if (!args.fechaInicio) {
+  if (!args.fechaInicio && !args.inicio) {
     for (const socioId of args.socioIds) {
       if (desde === 'hoy') {
         await trx

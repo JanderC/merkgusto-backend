@@ -85,7 +85,7 @@ posRouter.post(
 );
 
 const itemSchema = z.discriminatedUnion('tipo', [
-  z.object({ tipo: z.literal('membresia'), id: z.number().int().positive(), acompanantes: z.array(z.string().uuid()).max(9).optional(), desde: z.enum(['continuar', 'hoy']).optional() }),
+  z.object({ tipo: z.literal('membresia'), id: z.number().int().positive(), acompanantes: z.array(z.string().uuid()).max(9).optional(), desde: z.enum(['continuar', 'hoy']).optional(), inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }),
   z.object({ tipo: z.literal('producto'), id: z.number().int().positive(), cantidad: z.number().int().min(1).max(500) }),
   z.object({ tipo: z.literal('abono'), deudaId: z.number().int().positive(), monto: z.number().positive().max(1e12) }),
 ]);
