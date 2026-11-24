@@ -6,7 +6,9 @@ import { ah, badRequest, conflict, notFound, parse } from '../../lib/http.js';
 import { diasEntre, hoy } from '../../lib/util.js';
 import { soloDueno, usuarioActual } from '../../middleware/auth.js';
 import { encolarSocio } from '../biometric/biometric-sync.service.js';
+import { convertir } from '../../lib/monedas.js';
 import { moverStock } from '../inventario/kardex.js';
+import { getTasas } from '../tasas/tasas.service.js';
 import { describirDuracion, diasAproximados } from '../membresias/membresias.service.js';
 
 export const planesRouter = Router();
@@ -284,51 +286,62 @@ productosRouter.get(
   }),
 );
 
+const SOLO_FACTURA = 'La mercancía solo entra cargando su factura en Inventario › Compras';
+
+/**
+ * Aquí solo nacen los SERVICIOS (sin inventario). Los productos con inventario
+ * se crean al cargar la factura de compra, con su costo y su precio.
+ */
 productosRouter.post(
   '/',
   soloDueno,
   ah(async (req, res) => {
-    const { stock, ...b } = parse(productoSchema, req.body);
-    const u = usuarioActual(req);
-    const p = await db.transaction().execute(async (trx) => {
-      const p = await trx.insertInto('productos').values({ ...b, stock: 0 }).returningAll().executeTakeFirstOrThrow();
-      await moverStock(trx, { productoId: p.id, cantidad: stock, tipo: 'ajuste', referencia: 'Stock inicial', usuarioId: u.id });
-      return trx.selectFrom('productos').selectAll().where('id', '=', p.id).executeTakeFirstOrThrow();
-    });
-    res.status(201).json(p);
+    const { stock: _s, costo: _c, ...b } = parse(productoSchema, req.body);
+    if (b.controlaStock) throw badRequest(`${SOLO_FACTURA}: ahí se crea el producto nuevo`);
+    res.status(201).json(await db.insertInto('productos').values({ ...b, costo: 0, stock: 0 }).returningAll().executeTakeFirstOrThrow());
   }),
 );
 
+/** Editar nombre, precio, código… El stock y el costo NO: vienen de las facturas y los conteos. */
 productosRouter.put(
   '/:id',
   soloDueno,
   ah(async (req, res) => {
-    const { stock, ...b } = parse(productoSchema.partial(), req.body);
+    const { stock, costo: _c, ...b } = parse(productoSchema.partial(), req.body);
     const id = Number(req.params.id);
     const u = usuarioActual(req);
     const p = await db.transaction().execute(async (trx) => {
-      const antes = await trx.selectFrom('productos').select(['stock']).where('id', '=', id).forUpdate().executeTakeFirst();
+      const antes = await trx.selectFrom('productos').select(['stock', 'costo', 'moneda', 'precio', 'controlaStock']).where('id', '=', id).forUpdate().executeTakeFirst();
       if (!antes) throw notFound('Producto no encontrado');
-      if (Object.keys(b).length) await trx.updateTable('productos').set(b).where('id', '=', id).execute();
-      // Cambiar el stock a mano también queda en el kardex
-      if (stock !== undefined && stock !== antes.stock) await moverStock(trx, { productoId: id, cantidad: stock - antes.stock, tipo: 'ajuste', referencia: 'Ajuste al editar el producto', usuarioId: u.id });
+      if (stock !== undefined && stock !== antes.stock) throw badRequest(`${SOLO_FACTURA}. Para corregir lo que hay en el estante usa el conteo físico.`);
+      // Si cambia la moneda de venta, el costo se pasa a la nueva moneda con la tasa de hoy
+      const cambios: Record<string, unknown> = { ...b };
+      if (b.moneda && b.moneda !== antes.moneda && Number(antes.costo) > 0) cambios.costo = Math.round(convertir(Number(antes.costo), antes.moneda, b.moneda, await getTasas()) * 100) / 100;
+      if (Object.keys(cambios).length) await trx.updateTable('productos').set(cambios).where('id', '=', id).execute();
+      if (b.precio !== undefined && Number(antes.precio) !== b.precio) {
+        await trx.insertInto('auditoria').values({ usuarioId: u.id, accion: 'producto.precio', detalle: JSON.stringify({ productoId: id, antes: Number(antes.precio), ahora: b.precio, moneda: b.moneda ?? antes.moneda }) }).execute();
+      }
       return trx.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow();
     });
     res.json(p);
   }),
 );
 
-/** Entrada de mercancía: suma unidades al stock. */
+/** Salida manual (merma, rotura, consumo interno). Sumar mercancía solo por factura. */
 productosRouter.post(
   '/:id/entrada',
   soloDueno,
   ah(async (req, res) => {
-    const { cantidad, motivo } = parse(z.object({ cantidad: z.number().int().min(-100_000).max(100_000), motivo: z.string().trim().max(150).nullish() }), req.body);
+    const { cantidad, motivo } = parse(
+      z.object({ cantidad: z.number().int().min(-100_000).max(-1, SOLO_FACTURA), motivo: z.string().trim().min(3, 'Escribe el motivo de la salida').max(150) }),
+      req.body,
+    );
     const id = Number(req.params.id);
-    const actual = await db.selectFrom('productos').select(['id', 'controlaStock']).where('id', '=', id).executeTakeFirst();
+    const actual = await db.selectFrom('productos').select(['id', 'controlaStock', 'stock']).where('id', '=', id).executeTakeFirst();
     if (!actual) throw notFound('Producto no encontrado');
     if (!actual.controlaStock) throw badRequest('Este producto no lleva control de inventario');
-    await moverStock(db, { productoId: id, cantidad, tipo: 'ajuste', referencia: motivo || (cantidad > 0 ? 'Entrada de mercancía' : 'Salida manual'), usuarioId: usuarioActual(req).id });
+    if (-cantidad > actual.stock) throw badRequest(`Solo hay ${actual.stock} en el inventario`);
+    await moverStock(db, { productoId: id, cantidad, tipo: 'ajuste', referencia: `Salida: ${motivo}`, usuarioId: usuarioActual(req).id });
     res.json(await db.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow());
   }),
 );

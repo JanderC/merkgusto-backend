@@ -39,12 +39,13 @@ check(lista.find((u) => u.id === admin.id)?.tienePin === true && !('pinHash' in 
 
 console.log('\n── Código de barras');
 const barras = `77${Date.now()}`.slice(0, 13);
-const prod = await call('POST', '/productos', { nombre: `Gatorade ${sfx}`, categoria: 'Bebidas', precio: 5000, moneda: 'COP', stock: 10, codigoBarras: barras }, D);
-check(prod.s === 201 && prod.j.codigoBarras === barras, 'producto creado con código de barras', prod.j);
-const dup = await call('POST', '/productos', { nombre: `Otro ${sfx}`, precio: 1000, moneda: 'COP', codigoBarras: barras }, D);
+const compra = await call('POST', '/inventario/compras', { moneda: 'COP', items: [{ nuevo: { nombre: `Gatorade ${sfx}`, categoria: 'Bebidas', moneda: 'COP', codigoBarras: barras }, cantidad: 10, costoUnitario: 3000, precioVenta: 5000 }], pago: { metodo: 'efectivo' } }, D);
+const prod = { s: compra.s, j: (await call('GET', '/productos', null, D)).j.find((p) => p.id === compra.j.productos?.[0]?.id) };
+check(prod.s === 201 && prod.j?.codigoBarras === barras && prod.j.stock === 10, 'producto creado en su factura con código de barras', compra.j);
+const dup = await call('POST', '/productos', { nombre: `Otro ${sfx}`, precio: 1000, moneda: 'COP', codigoBarras: barras, controlaStock: false }, D);
 check(dup.s === 409 && /código de barras/.test(dup.j?.message), 'código repetido rechazado con mensaje claro', dup.j);
-check((await call('POST', '/productos', { nombre: `Mal ${sfx}`, precio: 1, codigoBarras: 'ab cd$' }, D)).s === 400, 'código con caracteres raros rechazado');
-const sinCod = await call('POST', '/productos', { nombre: `Sin código ${sfx}`, precio: 2000, moneda: 'COP', stock: 5, codigoBarras: '' }, D);
+check((await call('POST', '/productos', { nombre: `Mal ${sfx}`, precio: 1, codigoBarras: 'ab cd$', controlaStock: false }, D)).s === 400, 'código con caracteres raros rechazado');
+const sinCod = await call('POST', '/productos', { nombre: `Sin código ${sfx}`, precio: 2000, moneda: 'COP', controlaStock: false, codigoBarras: '' }, D);
 check(sinCod.s === 201 && sinCod.j.codigoBarras === null, 'código vacío se guarda como "sin código"');
 await call('POST', '/pos/turno/abrir', {}, C);
 const cat = (await call('GET', '/pos/catalogo', null, C)).j;

@@ -476,6 +476,11 @@ export interface CompraItemsTable {
   cantidad: number;
   costoUnitario: Num;
   subtotal: Num;
+  costoConvertido: Num | null;
+  monedaProducto: Moneda | null;
+  precioVenta: Num | null;
+  precioAnterior: Num | null;
+  productoNuevo: Generated<boolean>;
 }
 
 export interface CompraPagosTable {

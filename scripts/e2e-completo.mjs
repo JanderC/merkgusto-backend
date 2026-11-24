@@ -31,8 +31,9 @@ console.log('\n── Proveedores y compras con costo');
 const prov = await call('POST', '/inventario/proveedores', { nombre: `Distribuidora ${sfx}`, documento: 'J-123', telefono: '0414' }, D);
 check(prov.s === 201, 'dueño crea proveedor', prov.j);
 check((await call('GET', '/inventario/proveedores', null, C)).s === 403, 'la cajera no entra a inventario');
-const prod = (await call('POST', '/productos', { nombre: `Proteína ${sfx}`, precio: 5000, moneda: 'COP', stock: 5 }, D)).j;
-check(prod.stock === 5, 'producto con stock inicial 5', prod);
+const c0 = await call('POST', '/inventario/compras', { moneda: 'COP', items: [{ nuevo: { nombre: `Proteína ${sfx}`, moneda: 'COP' }, cantidad: 5, costoUnitario: 3000, precioVenta: 5000 }], pago: { metodo: 'efectivo' } }, D);
+const prod = await stockDe(c0.j.productos?.[0]?.id);
+check(c0.s === 201 && prod?.stock === 5 && Number(prod.precio) === 5000, 'el producto nace en su factura con 5 unidades y precio', c0.j);
 const c1 = await call('POST', '/inventario/compras', { proveedorId: prov.j.id, factura: 'F-1', moneda: 'COP', items: [{ productoId: prod.id, cantidad: 10, costoUnitario: 3000 }], pago: { metodo: 'efectivo' } }, D);
 check(c1.s === 201 && c1.j.saldo === 0, 'compra de 10 a COP 3.000 pagada', c1.j);
 let p = await stockDe(prod.id);
@@ -62,15 +63,17 @@ check(v.s === 201, 'vende 20', v.j);
 check((await call('POST', `/inventario/compras/${c2.j.id}/anular`, { motivo: 'error de carga' }, D)).s === 409, 'no anula una compra cuya mercancía ya se vendió');
 const k = (await call('GET', `/inventario/movimientos?productoId=${prod.id}`, null, D)).j;
 check(
-  ['ajuste', 'compra', 'compra', 'venta'].every((t) => k.some((x) => x.tipo === t)) && k[0].tipo === 'venta' && k[0].cantidad === -20 && k[0].stockResultante === 5 && /Ticket #/.test(k[0].referencia),
-  'kardex: stock inicial, 2 compras y la venta (−20, quedan 5)',
+  k.filter((x) => x.tipo === 'compra').length === 3 && !k.some((x) => x.tipo === 'ajuste') && k[0].tipo === 'venta' && k[0].cantidad === -20 && k[0].stockResultante === 5 && /Ticket #/.test(k[0].referencia),
+  'kardex: 3 facturas y la venta (−20, quedan 5)',
   k,
 );
 const aj = await call('POST', `/productos/${prod.id}/entrada`, { cantidad: -1, motivo: 'Se rompió un envase' }, D);
 check(aj.s === 200 && aj.j.stock === 4, 'salida manual con motivo');
-await call('PUT', `/productos/${prod.id}`, { stock: 5 }, D);
+check((await call('PUT', `/productos/${prod.id}`, { stock: 50 }, D)).s === 400, 'el stock no se edita a mano: solo entra por factura');
+check((await call('POST', `/productos/${prod.id}/entrada`, { cantidad: 5, motivo: 'llegó mercancía' }, D)).s === 400, 'tampoco se suman unidades sin factura');
+check((await call('POST', `/productos/${prod.id}/entrada`, { cantidad: -99, motivo: 'de más' }, D)).s === 400, 'no saca más de lo que hay');
 const k2 = (await call('GET', `/inventario/movimientos?productoId=${prod.id}`, null, D)).j;
-check(k2[0].tipo === 'ajuste' && k2[0].cantidad === 1 && k2[1].referencia === 'Se rompió un envase', 'editar el stock a mano también queda en el kardex', k2.slice(0, 2));
+check(k2[0].tipo === 'ajuste' && k2[0].cantidad === -1 && /Se rompió un envase/.test(k2[0].referencia) && (await stockDe(prod.id)).stock === 4, 'la salida queda en el kardex con su motivo', k2.slice(0, 2));
 const fin = (await call('GET', `/finanzas/resumen?desde=${hoy}&hasta=${hoy}`, null, D)).j;
 check(fin.totales.comprasInventario >= 70000 && fin.totales.utilidad === Math.round((fin.totales.cobrado + fin.totales.otrosIngresos - (fin.totales.egresos - fin.totales.comprasInventario) - fin.totales.costoVendido) * 100) / 100, 'finanzas: la compra de mercancía no se resta dos veces de la utilidad', fin.totales);
 
@@ -83,17 +86,62 @@ check((await call('POST', '/inventario/conteos', {}, D)).s === 409, 'solo un con
 const act = (await call('GET', '/inventario/conteos/actual', null, D)).j;
 const fila = act.productos.find((x) => x.id === prod.id);
 check(fila && !('stock' in fila) && !('esperado' in fila) && fila.contado === null, 'quien cuenta NO ve lo que dice el sistema', fila);
-await call('PUT', `/inventario/conteos/${ct.j.id}/items`, { productoId: prod.id, contado: 3 }, D);
+await call('PUT', `/inventario/conteos/${ct.j.id}/items`, { productoId: prod.id, contado: 2 }, D);
 const sum = await call('PUT', `/inventario/conteos/${ct.j.id}/items`, { productoId: prod.id, sumar: 1 }, D);
-check(sum.j.contado === 4, 'con el lector suma de a uno (3 + 1 = 4)', sum.j);
+check(sum.j.contado === 3, 'con el lector suma de a uno (2 + 1 = 3)', sum.j);
 check((await call('GET', `/inventario/conteos/${ct.j.id}`, null, D)).s === 409, 'las diferencias no se ven con el conteo abierto');
 const cerr = await call('POST', `/inventario/conteos/${ct.j.id}/cerrar`, {}, D);
 check(cerr.s === 200, 'cierra el conteo', cerr.j);
-check((await stockDe(prod.id)).stock === 4, 'el stock queda en lo contado (4)');
+check((await stockDe(prod.id)).stock === 3, 'el stock queda en lo contado (3)');
 const dc = (await call('GET', `/inventario/conteos/${ct.j.id}`, null, D)).j;
-check(dc[0].esperado === 5 && dc[0].diferencia === -1 && dc[0].valorTexto, 'faltó 1 unidad y se valora a costo', dc[0]);
+check(dc[0].esperado === 4 && dc[0].diferencia === -1 && dc[0].valorTexto, 'faltó 1 unidad y se valora a costo', dc[0]);
 const hc = (await call('GET', '/inventario/conteos', null, D)).j.find((x) => x.id === ct.j.id);
 check(hc.faltanteRef > 0 && hc.conDiferencia === 1, 'historial: faltante valorado', hc);
+
+console.log('\n── Factura en dólares: crea productos, convierte a pesos y fija la venta');
+const prov2 = (await call('POST', '/inventario/proveedores', { nombre: `Provecom ${sfx}` }, D)).j;
+const yogG = `Yogurt griego 150g ${sfx}`;
+const yog7 = `Yogurt 7 ${sfx}`;
+const lineaG = { nuevo: { nombre: yogG, categoria: 'Lácteos', moneda: 'COP' }, cantidad: 18, costoUnitario: 1.1, precioVenta: 6000 };
+const linea7 = { nuevo: { nombre: yog7, categoria: 'Lácteos', moneda: 'COP' }, cantidad: 15, costoUnitario: 1.1, precioVenta: 5500 };
+const fact = (extra = {}) => ({ proveedorId: prov2.id, factura: `R-${sfx}`, fecha: hoy, moneda: 'USD', tasa: { dolar: 3600, bs: 9 }, totalFactura: 36.3, items: [lineaG, linea7], pago: { metodo: 'efectivo' }, ...extra });
+let rf = await call('POST', '/inventario/compras', fact({ totalFactura: 36.2 }), D);
+check(rf.s === 400 && /36,30/.test(rf.j?.message) && /36,20/.test(rf.j?.message), 'si el total no cuadra con el papel, no se guarda', rf.j);
+rf = await call('POST', '/inventario/compras', fact({ items: [{ ...lineaG, precioVenta: 3000 }], totalFactura: 19.8 }), D);
+check(rf.s === 400 && /por debajo del costo/.test(rf.j?.message), 'no deja vender por debajo del costo ($1,10 × 3.600 = COP 3.960)', rf.j);
+rf = await call('POST', '/inventario/compras', fact({ items: [{ ...lineaG, precioVenta: null }], totalFactura: 19.8 }), D);
+check(rf.s === 400, 'producto nuevo sin precio de venta: rechazado', rf.j);
+check(!(await call('GET', '/productos', null, D)).j.some((p) => p.nombre === yogG), 'los intentos fallidos no dejan productos a medias');
+const f1 = await call('POST', '/inventario/compras', fact(), D);
+check(f1.s === 201 && f1.j.total === 36.3 && f1.j.creados.length === 2, 'factura de $36,30 cargada con 2 productos nuevos', f1.j);
+const g = await stockDe(f1.j.productos[0].id);
+const y7 = await stockDe(f1.j.productos[1].id);
+check(g.moneda === 'COP' && g.stock === 18 && Number(g.costo) === 3960 && Number(g.precio) === 6000, 'yogurt griego: 18 und, costo COP 3.960, se vende a COP 6.000', g);
+check(y7.stock === 15 && Number(y7.costo) === 3960 && Number(y7.precio) === 5500, 'yogurt 7: 15 und a COP 3.960, se vende a COP 5.500', y7);
+const dF = (await call('GET', `/inventario/compras/${f1.j.id}`, null, D)).j;
+check(dF.items.length === 2 && dF.items.every((i) => i.productoNuevo && i.costoTexto === 'COP 3.960'), 'el detalle guarda el costo convertido a pesos', dF.items);
+const lF = (await call('GET', '/inventario/compras', null, D)).j.find((x) => x.id === f1.j.id);
+check(lF.tasas?.usdCop === 3600 && lF.tasas?.fuente === 'factura', 'la compra guarda la tasa con que se convirtió', lF.tasas);
+const dos = await call('POST', '/inventario/compras', fact(), D);
+check(dos.s === 409 && /ya está cargada/.test(dos.j?.message), 'la misma factura del mismo proveedor no se carga dos veces', dos.j);
+const otraVez = await call('POST', '/inventario/compras', { moneda: 'COP', items: [{ nuevo: { nombre: `  ${yogG.toUpperCase()} `, moneda: 'COP' }, cantidad: 1, costoUnitario: 100, precioVenta: 200 }], pago: null }, D);
+check(otraVez.s === 409 && /ya existe/.test(otraVez.j?.message), 'no crea dos veces el mismo producto (aunque cambie mayúsculas)', otraVez.j);
+const catF = (await call('GET', '/pos/catalogo', null, C)).j;
+check(catF.productos.some((p) => p.id === g.id && Number(p.precio) === 6000), 'ya está a la venta en caja');
+
+console.log('\n── Reposición con precio nuevo y anulación');
+const f2 = await call('POST', '/inventario/compras', { proveedorId: prov2.id, factura: `R2-${sfx}`, moneda: 'USD', tasa: { dolar: 4000, bs: 10 }, totalFactura: 12, items: [{ productoId: g.id, cantidad: 10, costoUnitario: 1.2, precioVenta: 7000 }], pago: null }, D);
+const g2 = await stockDe(g.id);
+check(f2.s === 201 && g2.stock === 28 && Number(g2.costo) === 4260 && Number(g2.precio) === 7000, 'reposición: costo promedio (18×3.960 + 10×4.800)/28 = 4.260 y precio nuevo', g2);
+check((await call('POST', `/inventario/compras/${f2.j.id}/anular`, { motivo: 'cargada por error' }, D)).s === 200, 'anula la reposición');
+const g3 = await stockDe(g.id);
+check(g3.stock === 18 && Number(g3.precio) === 6000 && Number(g3.costo) === 3960, 'al anular vuelven el stock, el costo y el precio de antes', g3);
+
+console.log('\n── Solo por factura');
+check((await call('POST', '/productos', { nombre: `Suelto ${sfx}`, precio: 1000 }, D)).s === 400, 'un producto con inventario no se crea fuera de la factura');
+const serv = await call('POST', '/productos', { nombre: `Toalla ${sfx}`, precio: 2000, controlaStock: false }, D);
+check(serv.s === 201 && serv.j.stock === 0, 'un servicio sin inventario sí se crea en el catálogo', serv.j);
+check((await call('POST', '/inventario/compras', { moneda: 'COP', items: [{ productoId: serv.j.id, cantidad: 1, costoUnitario: 100, precioVenta: 2000 }], pago: null }, D)).s === 400, 'un servicio no se compra por factura');
 
 console.log('\n── Pago a entrenadores');
 const ent = (await call('POST', '/entrenadores', { nombre: `Coach ${sfx}`, pin: '4321', pagoTipo: 'fijo', pagoTarifa: 200, pagoMoneda: 'USD' }, D)).j;

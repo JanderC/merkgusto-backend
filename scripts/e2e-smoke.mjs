@@ -74,7 +74,8 @@ const ext = await call('GET', '/tasas/externas', null, C);
 check(ext.s === 200 && 'bcv' in ext.j, 'consulta BCV/paralelo/TRM', ext.j);
 
 console.log('Catálogo multimoneda y planes mes a mes');
-const agua = (await call('POST', '/productos', { nombre: 'Agua E2E', categoria: 'Bebidas', precio: 4500, moneda: 'COP', costo: 2500, stock: 50 }, D)).j;
+const cAgua = (await call('POST', '/inventario/compras', { moneda: 'COP', totalFactura: 125000, items: [{ nuevo: { nombre: `Agua E2E ${sfx}`, categoria: 'Bebidas', moneda: 'COP' }, cantidad: 50, costoUnitario: 2500, precioVenta: 4500 }], pago: { metodo: 'efectivo' } }, D)).j;
+const agua = (await call('GET', '/productos', null, D)).j.find((p) => p.id === cAgua.productos?.[0]?.id);
 const mensual = (await call('POST', '/planes', { nombre: 'Mensual E2E', tipoDuracion: 'meses', cantidad: 1, precio: 25, moneda: 'USD' }, D)).j;
 const duo = (await call('POST', '/planes', { nombre: 'Duo E2E', tipoDuracion: 'meses', cantidad: 1, precio: 40, moneda: 'USD', personas: 2 }, D)).j;
 check(agua.moneda === 'COP' && mensual.tipoDuracion === 'meses', 'producto en COP y plan mensual en USD', [agua, mensual]);

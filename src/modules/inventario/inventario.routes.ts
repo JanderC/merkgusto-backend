@@ -107,8 +107,37 @@ inventarioRouter.post(
         factura: z.string().trim().max(40).nullish(),
         fecha: fecha.optional(),
         moneda,
+        tasa: z
+          .object({
+            dolar: z.number().positive('La tasa del dólar debe ser mayor a 0').max(1e7),
+            bs: z.number().positive('La tasa del bolívar debe ser mayor a 0').max(1e7),
+          })
+          .nullish(),
+        totalFactura: z.number().min(0).max(1e13).nullish(),
         items: z
-          .array(z.object({ productoId: z.number().int().positive(), cantidad: z.number().int().min(1).max(100_000), costoUnitario: z.number().min(0).max(1e12) }))
+          .array(
+            z.object({
+              productoId: z.number().int().positive().nullish(),
+              nuevo: z
+                .object({
+                  nombre: z.string().trim().min(2, 'Escribe el nombre del producto nuevo').max(100),
+                  categoria: z.string().trim().max(40).default('General'),
+                  codigoBarras: z
+                    .string()
+                    .trim()
+                    .max(40)
+                    .regex(/^[0-9A-Za-z._\-]*$/, 'Código de barras: solo números, letras, punto o guion')
+                    .nullish()
+                    .transform((v) => v || null),
+                  moneda: moneda.default('COP'),
+                  stockMinimo: z.number().int().min(0).max(100_000).optional(),
+                })
+                .nullish(),
+              cantidad: z.number().int().min(1, 'La cantidad debe ser al menos 1').max(100_000),
+              costoUnitario: z.number().min(0).max(1e12),
+              precioVenta: z.number().min(0).max(1e12).nullish(),
+            }),
+          )
           .min(1, 'Agrega al menos un producto')
           .max(100),
         pago: z.object({ metodo: z.string().max(20), monto: z.number().positive().max(1e13).nullish() }).nullable(),
