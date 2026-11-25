@@ -161,7 +161,7 @@ export interface VentasTable {
 export interface VentaItemsTable {
   id: Generated<number>;
   ventaId: string;
-  tipo: 'membresia' | 'producto' | 'abono';
+  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado';
   referenciaId: number;
   descripcion: string;
   cantidad: number;
@@ -274,6 +274,13 @@ export interface EntrenadoresTable {
   passwordHash: ColumnType<string | null, string | null | undefined, string | null>;
   ultimoAcceso: TimestampNull;
   sesionVersion: Generated<number>;
+  /** Tarifa del entrenamiento personalizado por mes (null = no ofrece personalizado) */
+  personalizadoPrecio: ColumnType<number | null, number | string | null | undefined, number | string | null>;
+  /** Tarifa por semana (opcional) */
+  personalizadoSemanal: ColumnType<number | null, number | string | null | undefined, number | string | null>;
+  personalizadoMoneda: Generated<Moneda>;
+  /** % de lo que paga el cliente que le corresponde al entrenador */
+  personalizadoComision: ColumnType<number, number | string | undefined, number | string>;
 }
 
 export type PagoTipo = 'ninguno' | 'fijo' | 'por_hora' | 'por_clase';
@@ -532,6 +539,25 @@ export interface ConteoItemsTable {
   actualizadoEn: Timestamp;
 }
 
+export interface PersonalizadosTable {
+  id: Generated<number>;
+  socioId: string;
+  entrenadorId: string;
+  ventaId: string | null;
+  fechaInicio: string;
+  fechaFin: string;
+  tipoDuracion: 'semanas' | 'meses';
+  cantidad: number;
+  precio: Num;
+  moneda: Moneda;
+  comisionPct: Num;
+  montoEntrenador: Num;
+  estado: Generated<'activa' | 'anulada'>;
+  entrenadorPagoId: number | null;
+  creadoPor: string | null;
+  creadoEn: Generated<Date>;
+}
+
 export interface EntrenadorPagosTable {
   id: Generated<number>;
   entrenadorId: string;
@@ -544,6 +570,8 @@ export interface EntrenadorPagosTable {
   montoBase: Num;
   bonos: Num;
   descuentos: Num;
+  /** Parte del total por entrenamientos personalizados (en la moneda del pago) */
+  personalizados: ColumnType<number, number | string | undefined, number | string>;
   total: Num;
   moneda: Moneda;
   metodo: string;
@@ -661,6 +689,7 @@ export interface DB {
   conteos: ConteosTable;
   conteoItems: ConteoItemsTable;
   entrenadorPagos: EntrenadorPagosTable;
+  personalizados: PersonalizadosTable;
   socioMediciones: SocioMedicionesTable;
   socioRutinas: SocioRutinasTable;
   rutinaPlantillas: RutinaPlantillasTable;

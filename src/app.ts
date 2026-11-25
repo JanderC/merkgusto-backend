@@ -26,6 +26,7 @@ import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { planesRouter, productosRouter } from './modules/planes/planes.routes.js';
 import { clasesRouter } from './modules/clases/clases.routes.js';
 import { membresiasRouter } from './modules/membresias/membresias.routes.js';
+import { personalizadosRouter } from './modules/personalizados/personalizados.routes.js';
 import { portalRouter, progresoRouter } from './modules/socios/progreso.routes.js';
 import { socioFotoHandler, sociosRouter } from './modules/socios/socios.routes.js';
 import { respaldosRouter } from './modules/respaldos/respaldos.routes.js';
@@ -93,6 +94,7 @@ export function createApp() {
   api.use('/socios', progresoRouter);
   api.use('/socios', sociosRouter);
   api.use('/membresias', membresiasRouter);
+  api.use('/personalizados', personalizadosRouter);
   api.use('/clases', clasesRouter);
   api.use('/planes', planesRouter);
   api.use('/productos', productosRouter);

@@ -62,6 +62,7 @@ export async function textoReporteDiario(fecha: string) {
     `💵 *Total vendido: ${f(r.ventas.total)}*`,
     `   Planes: ${r.ventas.membresias.cantidad} · ${f(r.ventas.membresias.monto)}`,
     `   Productos: ${r.ventas.productos.cantidad} und · ${f(r.ventas.productos.monto)}`,
+    ...(r.ventas.personalizados.cantidad ? [`   Personalizados: ${r.ventas.personalizados.cantidad} · ${f(r.ventas.personalizados.monto)}`] : []),
     r.ventas.abonos.cantidad ? `   Abonos a deudas: ${f(r.ventas.abonos.monto)}` : null,
     r.ventas.fiado > 0 ? `   📒 Quedó fiado: ${f(r.ventas.fiado)}` : null,
     '',

@@ -25,7 +25,7 @@ export const posRouter = Router();
 posRouter.get(
   '/catalogo',
   ah(async (_req, res) => {
-    const [planes, productos, metodos, tasa, categorias, masVendidos] = await Promise.all([
+    const [planes, productos, metodos, tasa, categorias, masVendidos, entrenadores] = await Promise.all([
       db
         .selectFrom('planes')
         .select(['id', 'nombre', 'descripcion', 'precio', 'moneda', 'tipoDuracion', 'cantidad', 'personas', 'congelable', 'accesoLector', 'color'])
@@ -55,11 +55,28 @@ posRouter.get(
         .orderBy('n', 'desc')
         .limit(8)
         .execute(),
+      // Entrenamiento personalizado: entrenadores con tarifa
+      db
+        .selectFrom('entrenadores')
+        .select(['id', 'nombre', 'apellido', 'especialidad', 'personalizadoPrecio', 'personalizadoSemanal', 'personalizadoMoneda', sql<boolean>`foto is not null`.as('tieneFoto')])
+        .where('activo', '=', true)
+        .where('personalizadoPrecio', '>', 0 as never)
+        .orderBy('nombre')
+        .execute(),
     ]);
     res.json({
       planes: planes.map((p) => ({ ...p, duracion: describirDuracion(p) })),
       masVendidos: masVendidos.map((m) => m.id).filter((id) => productos.some((p) => p.id === id)),
       productos,
+      entrenadores: entrenadores.map((e) => ({
+        id: e.id,
+        nombre: `${e.nombre} ${e.apellido}`.trim(),
+        especialidad: e.especialidad,
+        tieneFoto: e.tieneFoto,
+        moneda: e.personalizadoMoneda,
+        mensual: Number(e.personalizadoPrecio),
+        semanal: e.personalizadoSemanal !== null && Number(e.personalizadoSemanal) > 0 ? Number(e.personalizadoSemanal) : null,
+      })),
       metodos,
       tasas: { usdVes: tasa.usdVes, usdCop: tasa.usdCop, vesCop: tasa.vesCop },
       tasasActualizadas: tasa.creadoEn,
@@ -88,6 +105,7 @@ const itemSchema = z.discriminatedUnion('tipo', [
   z.object({ tipo: z.literal('membresia'), id: z.number().int().positive(), acompanantes: z.array(z.string().uuid()).max(9).optional(), desde: z.enum(['continuar', 'hoy']).optional(), inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }),
   z.object({ tipo: z.literal('producto'), id: z.number().int().positive(), cantidad: z.number().int().min(1).max(500) }),
   z.object({ tipo: z.literal('abono'), deudaId: z.number().int().positive(), monto: z.number().positive().max(1e12) }),
+  z.object({ tipo: z.literal('personalizado'), entrenadorId: z.string().uuid(), periodo: z.enum(['meses', 'semanas']), cantidad: z.number().int().min(1).max(12), desde: z.enum(['continuar', 'hoy']).optional() }),
 ]);
 
 const ventaSchema = z.object({

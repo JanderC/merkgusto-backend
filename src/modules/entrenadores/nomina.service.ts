@@ -9,6 +9,8 @@ import type { Moneda, PagoTipo } from '../../db/types.js';
 import { badRequest, conflict, notFound } from '../../lib/http.js';
 import { fmt, redondear } from '../../lib/monedas.js';
 import { egresoAdministracion } from '../caja/caja.service.js';
+import { porLiquidar } from '../personalizados/personalizados.service.js';
+import { getTasas } from '../tasas/tasas.service.js';
 import { reportePeriodo } from './entrenadores.service.js';
 
 export const CATEGORIA_NOMINA = 'Entrenadores';
@@ -31,7 +33,7 @@ async function clasesDictadas(desde: string, hasta: string) {
 /** Lo que corresponde pagarle a cada entrenador en el periodo (y si ya se le pagó). */
 export async function nomina(desde: string, hasta: string) {
   if (hasta < desde) throw badRequest('El periodo está al revés');
-  const [lista, reporte, clases, pagos] = await Promise.all([
+  const [lista, reporte, clases, pagos, tasas] = await Promise.all([
     db.selectFrom('entrenadores').select(['id', 'nombre', 'apellido', 'activo', 'pagoTipo', 'pagoTarifa', 'pagoMoneda']).orderBy('nombre').execute(),
     reportePeriodo(desde, hasta),
     clasesDictadas(desde, hasta),
@@ -42,9 +44,12 @@ export async function nomina(desde: string, hasta: string) {
       .where('hasta', '>=', desde)
       .where('desde', '<=', hasta)
       .execute(),
+    getTasas(),
   ]);
+  // Personalizados cobrados (y aún no pagados al entrenador) hasta el corte
+  const pz = await porLiquidar(db, lista.map((e) => e.id), hasta, (id) => lista.find((e) => e.id === id)!.pagoMoneda, tasas);
   return lista
-    .filter((e) => e.activo || pagos.some((p) => p.entrenadorId === e.id))
+    .filter((e) => e.activo || pagos.some((p) => p.entrenadorId === e.id) || (pz.get(e.id)?.listos.length ?? 0) > 0)
     .map((e) => {
       const rep = reporte.find((r) => r.id === e.id);
       const horas = rep?.horas ?? 0;
@@ -52,6 +57,9 @@ export async function nomina(desde: string, hasta: string) {
       const tarifa = Number(e.pagoTarifa);
       const base = e.pagoTipo === 'fijo' ? tarifa : e.pagoTipo === 'por_hora' ? tarifa * horas : e.pagoTipo === 'por_clase' ? tarifa * nClases : 0;
       const pagado = pagos.filter((p) => p.entrenadorId === e.id);
+      const p = pz.get(e.id)!;
+      const montoBase = redondear(base, e.pagoMoneda);
+      const total = redondear(montoBase + p.monto, e.pagoMoneda);
       return {
         id: e.id,
         nombre: `${e.nombre} ${e.apellido}`.trim(),
@@ -65,8 +73,19 @@ export async function nomina(desde: string, hasta: string) {
         diasTrabajados: rep?.diasTrabajados ?? 0,
         tardanzas: rep?.tardanzas ?? 0,
         ausencias: rep?.ausencias ?? 0,
-        montoBase: redondear(base, e.pagoMoneda),
-        montoTexto: fmt(redondear(base, e.pagoMoneda), e.pagoMoneda),
+        montoBase,
+        montoTexto: fmt(montoBase, e.pagoMoneda),
+        personalizados: {
+          monto: p.monto,
+          montoTexto: p.montoTexto,
+          cantidad: p.listos.length,
+          retenido: p.retenido,
+          retenidoTexto: p.retenidoTexto,
+          retenidos: p.retenidos.length,
+          detalle: [...p.listos.map((d) => ({ ...d, retenido: false })), ...p.retenidos.map((d) => ({ ...d, retenido: true }))],
+        },
+        total,
+        totalTexto: fmt(total, e.pagoMoneda),
         pagos: pagado.map((p) => ({ id: p.id, desde: p.desde, hasta: p.hasta, totalTexto: fmt(Number(p.total), p.moneda), creadoEn: p.creadoEn })),
       };
     });
@@ -78,15 +97,18 @@ export async function registrarPago(
 ) {
   const fila = (await nomina(input.desde, input.hasta)).find((n) => n.id === input.entrenadorId);
   if (!fila) throw notFound('Entrenador no encontrado');
-  if (fila.pagoTipo === 'ninguno') throw badRequest('Primero configura cómo se le paga a este entrenador');
+  if (fila.pagoTipo === 'ninguno' && fila.personalizados.cantidad === 0) throw badRequest('Primero configura cómo se le paga a este entrenador (o espera a que tenga personalizados cobrados)');
   if (fila.pagos.length) throw conflict(`Ya tiene un pago registrado que cubre parte de ese periodo (${fila.pagos.map((p) => `${p.desde} → ${p.hasta}`).join(', ')})`);
   const m: Moneda = fila.moneda;
   const bonos = redondear(input.bonos, m);
   const descuentos = redondear(input.descuentos, m);
-  const total = redondear(fila.montoBase + bonos - descuentos, m);
-  if (total < 0) throw badRequest('Los descuentos no pueden superar lo que le corresponde');
 
   return db.transaction().execute(async (trx) => {
+    // Se bloquean los personalizados que entran en este pago: nadie los paga dos veces
+    const tasas = await getTasas();
+    const pz = (await porLiquidar(trx, [input.entrenadorId], input.hasta, () => m, tasas, true)).get(input.entrenadorId)!;
+    const total = redondear(fila.montoBase + pz.monto + bonos - descuentos, m);
+    if (total < 0) throw badRequest('Los descuentos no pueden superar lo que le corresponde');
     const mov =
       total > 0
         ? await egresoAdministracion(trx, { usuarioId, categoria: CATEGORIA_NOMINA, concepto: `Pago a ${fila.nombre} (${input.desde} → ${input.hasta})`, metodo: input.metodo, moneda: m, monto: total })
@@ -104,6 +126,7 @@ export async function registrarPago(
         montoBase: fila.montoBase,
         bonos,
         descuentos,
+        personalizados: pz.monto,
         total,
         moneda: m,
         metodo: input.metodo,
@@ -113,7 +136,17 @@ export async function registrarPago(
       })
       .returning(['id'])
       .executeTakeFirstOrThrow();
-    await trx.insertInto('auditoria').values({ usuarioId, accion: 'entrenador.pago', detalle: JSON.stringify({ pagoId: p.id, entrenadorId: input.entrenadorId, total, moneda: m }) }).execute();
+    if (pz.listos.length) {
+      await trx
+        .updateTable('personalizados')
+        .set({ entrenadorPagoId: p.id })
+        .where('id', 'in', pz.listos.map((d) => d.id))
+        .execute();
+    }
+    await trx
+      .insertInto('auditoria')
+      .values({ usuarioId, accion: 'entrenador.pago', detalle: JSON.stringify({ pagoId: p.id, entrenadorId: input.entrenadorId, total, personalizados: pz.monto, personalizadoIds: pz.listos.map((d) => d.id), moneda: m }) })
+      .execute();
     return { id: p.id, total, totalTexto: fmt(total, m) };
   });
 }
@@ -124,6 +157,8 @@ export async function anularPago(id: number, usuarioId: string, motivo: string) 
     if (!p) throw notFound('Pago no encontrado');
     if (p.anulado) throw conflict('El pago ya estaba anulado');
     await trx.updateTable('entrenadorPagos').set({ anulado: true }).where('id', '=', id).execute();
+    // Sus personalizados vuelven a quedar pendientes de pago
+    await trx.updateTable('personalizados').set({ entrenadorPagoId: null }).where('entrenadorPagoId', '=', id).execute();
     if (p.movimientoId) await trx.updateTable('cajaMovimientos').set({ anulado: true, anuladoPor: usuarioId, motivoAnulacion: `Pago a entrenador anulado: ${motivo}` }).where('id', '=', p.movimientoId).execute();
     await trx.insertInto('auditoria').values({ usuarioId, accion: 'entrenador.pago_anulado', detalle: JSON.stringify({ pagoId: id, motivo }) }).execute();
     return { ok: true };
@@ -147,6 +182,7 @@ export async function historialPagos(f: { entrenadorId?: string; desde?: string;
       'p.montoBase',
       'p.bonos',
       'p.descuentos',
+      'p.personalizados',
       'p.total',
       'p.moneda',
       'p.nota',
@@ -163,5 +199,5 @@ export async function historialPagos(f: { entrenadorId?: string; desde?: string;
   if (f.desde) q = q.where('p.hasta', '>=', f.desde);
   if (f.hasta) q = q.where('p.desde', '<=', f.hasta);
   const rows = await q.execute();
-  return rows.map((p) => ({ ...p, totalTexto: fmt(Number(p.total), p.moneda), baseTexto: fmt(Number(p.montoBase), p.moneda), bonosTexto: fmt(Number(p.bonos), p.moneda), descuentosTexto: fmt(Number(p.descuentos), p.moneda), horas: Number(p.horas) }));
+  return rows.map((p) => ({ ...p, totalTexto: fmt(Number(p.total), p.moneda), baseTexto: fmt(Number(p.montoBase), p.moneda), bonosTexto: fmt(Number(p.bonos), p.moneda), descuentosTexto: fmt(Number(p.descuentos), p.moneda), personalizadosTexto: Number(p.personalizados) > 0 ? fmt(Number(p.personalizados), p.moneda) : null, horas: Number(p.horas) }));
 }

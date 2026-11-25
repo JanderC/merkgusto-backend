@@ -80,6 +80,7 @@ export async function resumenDia(fecha: string) {
       membresias: { cantidad: Number(tipo('membresia')?.cantidad ?? 0), monto: r(tipo('membresia')?.monto) },
       productos: { cantidad: Number(tipo('producto')?.cantidad ?? 0), monto: r(tipo('producto')?.monto) },
       abonos: { cantidad: Number(tipo('abono')?.cantidad ?? 0), monto: r(tipo('abono')?.monto) },
+      personalizados: { cantidad: Number(tipo('personalizado')?.cantidad ?? 0), monto: r(tipo('personalizado')?.monto) },
       porMetodo: porMetodo
         .map((m) => ({ nombre: m.nombre, moneda: m.moneda as Moneda, montoMoneda: Number(m.montoMoneda), monto: r(m.monto) }))
         .filter((m) => m.montoMoneda !== 0),

@@ -17,11 +17,14 @@ import { Router } from 'express';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { db } from '../../db/index.js';
+import { fmt as fmtM } from '../../lib/monedas.js';
 import { ah, badRequest, conflict, forbidden, notFound, parse } from '../../lib/http.js';
 import { hoy, sumarDias } from '../../lib/util.js';
 import { entrenadorActual, tokenEntrenador } from '../../middleware/auth.js';
 import { baseClases, cargarClase, claseSchema, coberturas, diaLocal, inicioDe, inscribirEnClase, limpiarCar, pasarAClase } from '../clases/clases.routes.js';
 import { describirDuracion, vigenciaDesdeFilas } from '../membresias/membresias.service.js';
+import { porLiquidar, tableroPersonalizados, type FilaPersonalizado } from '../personalizados/personalizados.service.js';
+import { getTasas } from '../tasas/tasas.service.js';
 import { crearRutina, diasSchema, editarRutina, entrenos, generarEnlace, mediciones, medicionSchema, rutinas, rutinaSchema, socioExiste } from '../socios/progreso.service.js';
 
 export const coachRouter = Router();
@@ -105,7 +108,13 @@ function filaVacia() {
   };
 }
 
-type Alerta = { tipo: 'vence' | 'vencido' | 'ausente' | 'sin_rutina' | 'medir'; texto: string };
+type Alerta = { tipo: 'vence' | 'vencido' | 'ausente' | 'sin_rutina' | 'medir' | 'personalizado'; texto: string };
+
+/** Lo que el entrenador ve del personalizado de su cliente. */
+function resumenPz(f: FilaPersonalizado | undefined) {
+  if (!f) return null;
+  return { estado: f.estado, texto: f.estadoTexto, desde: f.desde, hasta: f.hasta, diasRestantes: f.diasRestantes, deudaTexto: f.deudaTexto, ultimoPago: f.ultimoPago ? { fecha: f.ultimoPago.fecha, duracion: f.ultimoPago.duracion, precioTexto: f.ultimoPago.precioTexto } : null };
+}
 function alertasDe(r: ReturnType<typeof filaVacia>): Alerta[] {
   const a: Alerta[] = [];
   if (r.vigente && r.diasRestantes <= 5) a.push({ tipo: 'vence', texto: r.diasRestantes <= 0 ? 'Vence hoy' : `Le quedan ${r.diasRestantes} día(s)` });
@@ -117,6 +126,7 @@ function alertasDe(r: ReturnType<typeof filaVacia>): Alerta[] {
 }
 
 async function misClientes(entrenadorId: string) {
+  const pz = await tableroPersonalizados({ entrenadorId, diasVencidos: 365 });
   const socios = await db
     .selectFrom('socios')
     .select(['id', 'codigo', 'nombre', 'apellido', 'telefono', 'activo', sql<boolean>`foto is not null`.as('tieneFoto'), sql<boolean>`clave_hash is not null`.as('privado'), 'appUltimoAcceso'])
@@ -127,7 +137,10 @@ async function misClientes(entrenadorId: string) {
   const r = await resumenClientes(socios.map((s) => s.id));
   return socios.map((s) => {
     const x = r.get(s.id) ?? filaVacia();
-    return { ...s, ...x, alertas: alertasDe(x) };
+    const personalizado = resumenPz(pz.find((f) => f.socioId === s.id && f.estado !== 'sin_pago'));
+    const alertas = alertasDe(x);
+    if (personalizado && ['vencido', 'debe', 'vence'].includes(personalizado.estado)) alertas.unshift({ tipo: 'personalizado', texto: `Personalizado: ${personalizado.texto.toLowerCase()}` });
+    return { ...s, ...x, personalizado, alertas };
   });
 }
 
@@ -180,6 +193,13 @@ coachRouter.get(
         sinRutina: clientes.filter((c) => !c.rutina).length,
         entrenaronSemana: clientes.filter((c) => c.entrenosSemana > 0).length,
       },
+      personalizados: {
+        alDia: clientes.filter((c) => c.personalizado && ['al_dia', 'por_empezar'].includes(c.personalizado.estado)).length,
+        vencen: clientes.filter((c) => c.personalizado?.estado === 'vence').length,
+        vencidos: clientes.filter((c) => c.personalizado?.estado === 'vencido').length,
+        deben: clientes.filter((c) => c.personalizado?.estado === 'debe').length,
+        sinPago: clientes.filter((c) => !c.personalizado).length,
+      },
       alertas: conAlerta.map((c) => ({ id: c.id, nombre: `${c.nombre} ${c.apellido}`.trim(), tieneFoto: c.tieneFoto, alertas: c.alertas.filter((a) => a.tipo !== 'medir') })),
     });
   }),
@@ -190,6 +210,29 @@ coachRouter.get(
   '/clientes',
   ah(async (req, res) => {
     res.json(await misClientes(entrenadorActual(req).id));
+  }),
+);
+
+/** Mis personalizados: quién pagó, quién no y lo que me toca cobrar en mi próximo pago. */
+coachRouter.get(
+  '/personalizados',
+  ah(async (req, res) => {
+    const yo = entrenadorActual(req);
+    const [filas, e, tasas] = await Promise.all([
+      tableroPersonalizados({ entrenadorId: yo.id, diasVencidos: 365 }),
+      db.selectFrom('entrenadores').select(['pagoMoneda', 'personalizadoPrecio', 'personalizadoSemanal', 'personalizadoMoneda', 'personalizadoComision']).where('id', '=', yo.id).executeTakeFirstOrThrow(),
+      getTasas(),
+    ]);
+    const liq = (await porLiquidar(db, [yo.id], hoy(), () => e.pagoMoneda, tasas)).get(yo.id)!;
+    res.json({
+      filas: filas.map((f) => ({ socioId: f.socioId, nombre: f.nombre, telefono: f.telefono, tieneFoto: f.tieneFoto, ...resumenPz(f)! })),
+      tarifa: {
+        mensual: e.personalizadoPrecio !== null && Number(e.personalizadoPrecio) > 0 ? fmtM(Number(e.personalizadoPrecio), e.personalizadoMoneda) : null,
+        semanal: e.personalizadoSemanal !== null && Number(e.personalizadoSemanal) > 0 ? fmtM(Number(e.personalizadoSemanal), e.personalizadoMoneda) : null,
+        comision: Number(e.personalizadoComision),
+      },
+      porCobrar: { texto: liq.montoTexto, cantidad: liq.listos.length, retenidoTexto: liq.retenido > 0 ? liq.retenidoTexto : null, retenidos: liq.retenidos.length, detalle: [...liq.listos.map((d) => ({ ...d, retenido: false })), ...liq.retenidos.map((d) => ({ ...d, retenido: true }))] },
+    });
   }),
 );
 
@@ -283,6 +326,7 @@ coachRouter.get(
       mio: s.mio,
       app: { privado: !!s.claveHash, ultimoAcceso: s.appUltimoAcceso, enlace: !!s.portalTokenHash },
       ...r,
+      personalizado: resumenPz((await tableroPersonalizados({ entrenadorId: yo.id, socioId: s.id, diasVencidos: 365 })).find((f) => f.estado !== 'sin_pago')),
       alertas: alertasDe(r),
       mediciones: med,
       rutinas: rut,

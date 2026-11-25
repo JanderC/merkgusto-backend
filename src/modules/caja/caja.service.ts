@@ -27,12 +27,14 @@ import { encolarSocio } from '../biometric/biometric-sync.service.js';
 import { getConfig } from '../configuracion/config.service.js';
 import { crearMembresias, describirDuracion, type DesdeRenovacion } from '../membresias/membresias.service.js';
 import { moverStock } from '../inventario/kardex.js';
+import { anularPersonalizadosDeVenta, crearPersonalizado, prepararPersonalizado, type ItemPersonalizado } from '../personalizados/personalizados.service.js';
 import { getTasas } from '../tasas/tasas.service.js';
 
 export type ItemVentaInput =
   | { tipo: 'membresia'; id: number; acompanantes?: string[]; desde?: DesdeRenovacion; /** Se inscribió días antes: la mensualidad cuenta desde ese día */ inicio?: string }
   | { tipo: 'producto'; id: number; cantidad: number }
-  | { tipo: 'abono'; deudaId: number; monto: number };
+  | { tipo: 'abono'; deudaId: number; monto: number }
+  | ({ tipo: 'personalizado' } & ItemPersonalizado);
 
 export interface PagoInput {
   metodo: string;
@@ -71,7 +73,7 @@ export async function metodosActivos(dbx: Db) {
 }
 
 type Linea = {
-  tipo: 'membresia' | 'producto' | 'abono';
+  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado';
   referenciaId: number;
   descripcion: string;
   cantidad: number;
@@ -100,8 +102,25 @@ export async function registrarVenta(
     const lineas: Linea[] = [];
     const membresiasPedidas: Array<{ planId: number; socios: string[]; desde: DesdeRenovacion; inicio?: string; idx: number }> = [];
     const abonos: Array<{ deudaId: number; monto: number }> = [];
+    const personalizados: Array<{ idx: number; item: ItemPersonalizado; datos: Awaited<ReturnType<typeof prepararPersonalizado>> }> = [];
     for (const it of input.items) {
-      if (it.tipo === 'membresia') {
+      if (it.tipo === 'personalizado') {
+        if (!input.socioId) throw badRequest('Para cobrar un personalizado elige al cliente');
+        if (personalizados.some((x) => x.item.entrenadorId === it.entrenadorId)) throw badRequest('Ese personalizado ya está en el ticket');
+        const pz = await prepararPersonalizado(trx, input.socioId, it);
+        personalizados.push({ idx: lineas.length, item: it, datos: pz });
+        lineas.push({
+          tipo: 'personalizado',
+          // Se reemplaza por el id del personalizado al guardarlo
+          referenciaId: 0,
+          descripcion: pz.descripcion,
+          cantidad: 1,
+          moneda: pz.moneda,
+          precioUnitario: pz.precio,
+          subtotal: pz.precio,
+          datos: { entrenadorId: pz.entrenador.id, entrenador: pz.nombre, periodo: it.periodo, cantidad: it.cantidad, inicio: pz.inicio, fin: pz.fin, comision: pz.comision },
+        });
+      } else if (it.tipo === 'membresia') {
         if (!input.socioId) throw badRequest('Para vender un plan elige al cliente');
         const p = await trx.selectFrom('planes').selectAll().where('id', '=', it.id).executeTakeFirst();
         if (!p || !p.activo) throw badRequest('Plan no disponible');
@@ -227,7 +246,7 @@ export async function registrarVenta(
       })
       .returningAll()
       .executeTakeFirstOrThrow();
-    await trx
+    const itemsGuardados = await trx
       .insertInto('ventaItems')
       .values(
         lineas.map((l) => ({
@@ -243,6 +262,7 @@ export async function registrarVenta(
           datos: l.datos ? JSON.stringify(l.datos) : null,
         })),
       )
+      .returning(['id'])
       .execute();
     if (filas.length) {
       await trx
@@ -286,6 +306,13 @@ export async function registrarVenta(
       const c = await crearMembresias(trx, { socioIds: mp.socios, planId: mp.planId, ventaId: venta.id, precio: l.subtotal, moneda: l.moneda, desde: mp.desde, inicio: mp.inicio });
       membresias.push({ socioIds: mp.socios, inicio: c.inicio, fin: c.fin, plan: c.plan.nombre });
     }
+    // Entrenamiento personalizado: periodo pagado y cliente asignado al entrenador
+    const personalizadosHechos: Array<{ entrenador: string; inicio: string; fin: string }> = [];
+    for (const pz of personalizados) {
+      const id = await crearPersonalizado(trx, { ...pz.datos, socioId: input.socioId!, ventaId: venta.id, periodo: pz.item.periodo, cantidad: pz.item.cantidad, usuarioId: cajeroId });
+      await trx.updateTable('ventaItems').set({ referenciaId: id }).where('id', '=', itemsGuardados[pz.idx]!.id).execute();
+      personalizadosHechos.push({ entrenador: pz.datos.nombre, inicio: pz.datos.inicio, fin: pz.datos.fin });
+    }
     // Pago parcial → deuda del cliente
     let deuda: { id: number; saldo: number; texto: string } | null = null;
     if (deudaRef > 0 && input.socioId) {
@@ -304,7 +331,7 @@ export async function registrarVenta(
         .executeTakeFirstOrThrow();
       deuda = { id: d.id, saldo: deudaRef, texto: fmtTodas(deudaRef, MONEDA_REF, t) };
     }
-    return { venta, lineas, totales, membresias, deuda, vuelto };
+    return { venta, lineas, totales, membresias, personalizados: personalizadosHechos, deuda, vuelto };
   });
 
   // Fuera de la transacción: el lector nunca bloquea una venta
@@ -318,6 +345,7 @@ export async function registrarVenta(
     totales: r.totales,
     items: r.lineas.map((l) => ({ descripcion: l.descripcion, cantidad: l.cantidad, precio: fmt(l.subtotal, l.moneda) })),
     membresias: r.membresias.map((m) => ({ plan: m.plan, fechaInicio: m.inicio, fechaFin: m.fin, personas: m.socioIds.length })),
+    personalizados: r.personalizados.map((p) => ({ entrenador: p.entrenador, fechaInicio: p.inicio, fechaFin: p.fin })),
     vuelto: r.vuelto ? { moneda: r.vuelto.moneda, monto: r.vuelto.monto, texto: fmt(r.vuelto.monto, r.vuelto.moneda) } : null,
     deuda: r.deuda,
   };
@@ -675,6 +703,7 @@ export async function anularVenta(ventaId: string, usuarioId: string, motivo: st
           .execute();
       }
     }
+    await anularPersonalizadosDeVenta(trx, ventaId);
     const membs = await trx.updateTable('membresias').set({ estado: 'anulada' }).where('ventaId', '=', ventaId).returning('socioId').execute();
     await trx.updateTable('deudas').set({ estado: 'anulada', actualizadoEn: sql`now()` as never }).where('ventaId', '=', ventaId).execute();
     await trx

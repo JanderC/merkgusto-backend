@@ -8,6 +8,7 @@ import { gestionCaja, soloDueno, usuarioActual } from '../../middleware/auth.js'
 import { encolar, encolarSocio } from '../biometric/biometric-sync.service.js';
 import { FACE_MAX_BYTES } from '../biometric/dto/access-control.dto.js';
 import { congelarMembresia, reanudarMembresia, vigenciaSocio } from '../membresias/membresias.service.js';
+import { personalizadosDeSocio } from '../personalizados/personalizados.service.js';
 
 export const sociosRouter = Router();
 
@@ -64,7 +65,7 @@ sociosRouter.get(
       z.object({
         buscar: z.string().trim().max(80).optional(),
         estado: z.enum(['todos', 'vigentes', 'vencidos', 'por_vencer', 'inactivos', 'sin_rostro']).default('todos'),
-        limite: z.coerce.number().int().min(1).max(500).default(100),
+        limite: z.coerce.number().int().min(1).max(5000).default(100),
       }),
       req.query,
     );
@@ -115,7 +116,7 @@ sociosRouter.get(
     const s = await db.selectFrom('socios').selectAll().where('id', '=', req.params.id!).executeTakeFirst();
     if (!s) throw notFound('Cliente no encontrado');
     const esDueno = usuarioActual(req).rol !== 'cajero';
-    const [vigencia, membresias, asistencias, colaBio, deudas] = await Promise.all([
+    const [vigencia, membresias, asistencias, colaBio, deudas, personalizados] = await Promise.all([
       vigenciaSocio(s.id),
       db
         .selectFrom('membresias as m')
@@ -139,6 +140,7 @@ sociosRouter.get(
         .where('estado', 'in', ['pendiente', 'procesando', 'error'])
         .execute(),
       db.selectFrom('deudas').select(['id', 'concepto', 'moneda', 'montoTotal', 'saldo', 'creadoEn']).where('socioId', '=', s.id).where('estado', '=', 'pendiente').execute(),
+      personalizadosDeSocio(s.id),
     ]);
     res.json({
       ...s,
@@ -150,6 +152,7 @@ sociosRouter.get(
       membresias: esDueno ? membresias : membresias.map(({ precio: _p, ...m }) => m),
       asistencias,
       deudas,
+      personalizados,
     });
   }),
 );

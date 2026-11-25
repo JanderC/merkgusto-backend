@@ -109,6 +109,10 @@ admin.get(
           'pagoTipo',
           'pagoTarifa',
           'pagoMoneda',
+          'personalizadoPrecio',
+          'personalizadoSemanal',
+          'personalizadoMoneda',
+          'personalizadoComision',
           'usuario',
           'ultimoAcceso',
           sql<boolean>`password_hash is not null`.as('tieneAcceso'),
@@ -135,6 +139,11 @@ const entrenadorSchema = z.object({
   pagoTipo: z.enum(['ninguno', 'fijo', 'por_hora', 'por_clase']).optional(),
   pagoTarifa: z.number().min(0).max(1e12).optional(),
   pagoMoneda: z.enum(['USD', 'VES', 'COP']).optional(),
+  /** Entrenamiento personalizado: tarifa mensual (null = no ofrece), semanal opcional y % para el entrenador */
+  personalizadoPrecio: z.number().min(0).max(1e12).nullish(),
+  personalizadoSemanal: z.number().min(0).max(1e12).nullish(),
+  personalizadoMoneda: z.enum(['USD', 'VES', 'COP']).optional(),
+  personalizadoComision: z.number().min(0).max(100).optional(),
 });
 
 admin.post(
@@ -156,6 +165,10 @@ admin.post(
         ...(b.pagoTipo && { pagoTipo: b.pagoTipo }),
         ...(b.pagoTarifa !== undefined && { pagoTarifa: b.pagoTarifa }),
         ...(b.pagoMoneda && { pagoMoneda: b.pagoMoneda }),
+        personalizadoPrecio: b.personalizadoPrecio || null,
+        personalizadoSemanal: b.personalizadoSemanal || null,
+        ...(b.personalizadoMoneda && { personalizadoMoneda: b.personalizadoMoneda }),
+        ...(b.personalizadoComision !== undefined && { personalizadoComision: b.personalizadoComision }),
       })
       .returning(['id', 'codigo', 'nombre'])
       .executeTakeFirstOrThrow();
@@ -168,9 +181,17 @@ admin.put(
   '/:id',
   ah(async (req, res) => {
     const b = parse(entrenadorSchema.partial().extend({ pin: z.string().regex(/^\d{4,6}$/).optional() }), req.body);
-    const prev = await db.selectFrom('entrenadores').select(['id', 'foto']).where('id', '=', req.params.id!).executeTakeFirst();
+    const prev = await db
+      .selectFrom('entrenadores')
+      .select(['id', 'foto', 'personalizadoPrecio', 'personalizadoSemanal', 'personalizadoMoneda', 'personalizadoComision'])
+      .where('id', '=', req.params.id!)
+      .executeTakeFirst();
     if (!prev) throw notFound('Entrenador no encontrado');
-    const { pin, horario, ...rest } = b;
+    const { pin, horario, personalizadoPrecio, personalizadoSemanal, ...rest } = b;
+    const tarifa = {
+      ...(personalizadoPrecio !== undefined && { personalizadoPrecio: personalizadoPrecio || null }),
+      ...(personalizadoSemanal !== undefined && { personalizadoSemanal: personalizadoSemanal || null }),
+    };
     const fotoCambio = b.foto !== undefined && b.foto !== prev.foto;
     await db
       .updateTable('entrenadores')
@@ -178,10 +199,23 @@ admin.put(
         ...rest,
         ...(horario && { horario: JSON.stringify(horario) }),
         ...(pin && { pinHash: await bcrypt.hash(pin, 10) }),
+        ...tarifa,
         ...(fotoCambio && { bioEstado: b.foto ? 'pendiente' : 'sin_rostro', bioError: null }),
       })
       .where('id', '=', prev.id)
       .execute();
+    // La tarifa del personalizado es dinero: queda auditada
+    const antes = { precio: prev.personalizadoPrecio, semanal: prev.personalizadoSemanal, moneda: prev.personalizadoMoneda, comision: Number(prev.personalizadoComision) };
+    const despues = {
+      precio: tarifa.personalizadoPrecio !== undefined ? tarifa.personalizadoPrecio : prev.personalizadoPrecio,
+      semanal: tarifa.personalizadoSemanal !== undefined ? tarifa.personalizadoSemanal : prev.personalizadoSemanal,
+      moneda: b.personalizadoMoneda ?? prev.personalizadoMoneda,
+      comision: b.personalizadoComision ?? Number(prev.personalizadoComision),
+    };
+    const n = (x: unknown) => (x === null || x === undefined ? null : Number(x));
+    if (n(antes.precio) !== n(despues.precio) || n(antes.semanal) !== n(despues.semanal) || antes.moneda !== despues.moneda || antes.comision !== despues.comision) {
+      await db.insertInto('auditoria').values({ usuarioId: usuarioActual(req).id, accion: 'entrenador.tarifa_personalizado', detalle: JSON.stringify({ entrenadorId: prev.id, antes, despues }) }).execute();
+    }
     if (fotoCambio || b.activo !== undefined || b.nombre) await encolarEntrenador(prev.id);
     res.json({ ok: true });
   }),
