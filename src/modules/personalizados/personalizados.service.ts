@@ -13,7 +13,7 @@
 import { sql } from 'kysely';
 import { db, type Db } from '../../db/index.js';
 import type { Moneda } from '../../db/types.js';
-import { badRequest, conflict } from '../../lib/http.js';
+import { badRequest, conflict, notFound } from '../../lib/http.js';
 import { convertir, fmt, redondear, type Tasas } from '../../lib/monedas.js';
 import { diasEntre, hoy, sumarDias } from '../../lib/util.js';
 import { calcularFin, describirDuracion } from '../membresias/membresias.service.js';
@@ -146,8 +146,10 @@ export interface FilaPersonalizado {
   desde: string | null;
   hasta: string | null;
   diasRestantes: number;
-  /** Último cobro */
-  ultimoPago: { fecha: Date; ticket: number | null; precioTexto: string; duracion: string; precio: number; moneda: Moneda } | null;
+  /** Último cobro (sinCobro: lo registró la administración sin pasar por caja) */
+  ultimoPago: { fecha: Date; ticket: number | null; precioTexto: string; duracion: string; precio: number; moneda: Moneda; sinCobro: boolean } | null;
+  /** Último periodo registrado (el que se puede editar) */
+  ultimo: { id: number; fechaInicio: string; fechaFin: string } | null;
   deudaTexto: string | null;
   pagos: number;
 }
@@ -274,9 +276,11 @@ export async function tableroPersonalizados(f: { entrenadorId?: string; socioId?
         ticket: ultimo.ticket,
         precio: Number(ultimo.precio),
         moneda: ultimo.moneda,
-        precioTexto: fmt(Number(ultimo.precio), ultimo.moneda),
-        duracion: describirDuracion({ tipoDuracion: ultimo.tipoDuracion, cantidad: ultimo.cantidad }),
+        precioTexto: ultimo.ventaId ? fmt(Number(ultimo.precio), ultimo.moneda) : 'Sin cobro',
+        duracion: ultimo.ventaId ? describirDuracion({ tipoDuracion: ultimo.tipoDuracion, cantidad: ultimo.cantidad }) : `${diaMes(ultimo.fechaInicio)} → ${diaMes(ultimo.fechaFin)}`,
+        sinCobro: !ultimo.ventaId,
       },
+      ultimo: { id: ultimo.id, fechaInicio: ultimo.fechaInicio, fechaFin: ultimo.fechaFin },
       deudaTexto,
       pagos: rows.length,
     });
@@ -319,6 +323,7 @@ export async function tableroPersonalizados(f: { entrenadorId?: string; socioId?
       hasta: null,
       diasRestantes: 0,
       ultimoPago: null,
+      ultimo: null,
       deudaTexto: null,
       pagos: 0,
     });
@@ -332,7 +337,54 @@ const ORDEN: Record<EstadoPersonalizado, number> = { debe: 0, vencido: 1, vence:
 /** Personalizados vigentes del cliente (para la caja y su ficha). */
 export async function personalizadosDeSocio(socioId: string) {
   const filas = (await tableroPersonalizados({ socioId, diasVencidos: 120 })).filter((f) => f.estado !== 'sin_pago');
-  return filas.map((f) => ({ entrenadorId: f.entrenadorId, entrenador: f.entrenador, estado: f.estado, estadoTexto: f.estadoTexto, desde: f.desde, hasta: f.hasta, diasRestantes: f.diasRestantes, deudaTexto: f.deudaTexto }));
+  return filas.map((f) => ({ entrenadorId: f.entrenadorId, entrenador: f.entrenador, estado: f.estado, estadoTexto: f.estadoTexto, desde: f.desde, hasta: f.hasta, diasRestantes: f.diasRestantes, deudaTexto: f.deudaTexto, ultimo: f.ultimo, sinCobro: f.ultimoPago?.sinCobro ?? false }));
+}
+
+// ═════════════ Ajustes de la administración (no pasan por caja) ═════════════
+
+/**
+ * Registrar un personalizado SIN cobro (ya lo había pagado antes del sistema, cortesía…).
+ * No crea venta, no suma a caja y no le genera pago al entrenador (monto 0).
+ */
+export async function personalizadoSinCobro(a: { socioId: string; entrenadorId: string; fechaInicio: string; fechaFin: string; usuarioId: string }) {
+  if (a.fechaFin < a.fechaInicio) throw badRequest('La fecha de vencimiento no puede ser antes del inicio');
+  return db.transaction().execute(async (trx) => {
+    const e = await trx.selectFrom('entrenadores').select(['id', 'activo', 'personalizadoMoneda', 'personalizadoComision']).where('id', '=', a.entrenadorId).executeTakeFirst();
+    if (!e?.activo) throw badRequest('Ese entrenador no está activo');
+    const s = await trx.selectFrom('socios').select(['id', 'activo']).where('id', '=', a.socioId).executeTakeFirst();
+    if (!s?.activo) throw badRequest('Cliente no encontrado o desactivado');
+    const fila = await trx
+      .insertInto('personalizados')
+      .values({
+        socioId: a.socioId,
+        entrenadorId: a.entrenadorId,
+        ventaId: null,
+        fechaInicio: a.fechaInicio,
+        fechaFin: a.fechaFin,
+        tipoDuracion: 'meses',
+        cantidad: 1,
+        precio: 0,
+        moneda: e.personalizadoMoneda,
+        comisionPct: Number(e.personalizadoComision),
+        montoEntrenador: 0,
+        creadoPor: a.usuarioId,
+      })
+      .returning(['id'])
+      .executeTakeFirstOrThrow();
+    await trx.updateTable('socios').set({ entrenadorId: a.entrenadorId }).where('id', '=', a.socioId).execute();
+    return fila.id;
+  });
+}
+
+/** Corregir las fechas de un personalizado. No toca lo cobrado ni lo que le toca al entrenador. */
+export async function editarFechasPersonalizado(id: number, fechaInicio: string, fechaFin: string) {
+  if (fechaFin < fechaInicio) throw badRequest('La fecha de vencimiento no puede ser antes del inicio');
+  const p = await db.selectFrom('personalizados').select(['id', 'socioId', 'entrenadorId', 'estado', 'fechaInicio', 'fechaFin']).where('id', '=', id).executeTakeFirst();
+  if (!p) throw notFound('Personalizado no encontrado');
+  if (p.estado !== 'activa') throw badRequest('Ese personalizado está anulado');
+  if (p.fechaInicio === fechaInicio && p.fechaFin === fechaFin) throw badRequest('No cambiaste nada');
+  await db.updateTable('personalizados').set({ fechaInicio, fechaFin }).where('id', '=', id).execute();
+  return { antes: { fechaInicio: p.fechaInicio, fechaFin: p.fechaFin }, socioId: p.socioId, entrenadorId: p.entrenadorId };
 }
 
 // ═════════════ Lo que le toca al entrenador ═════════════
@@ -365,6 +417,8 @@ export async function porLiquidar(dbx: Db, entrenadorIds: string[], hasta: strin
     .where('p.entrenadorId', 'in', entrenadorIds)
     .where('p.estado', '=', 'activa')
     .where('p.entrenadorPagoId', 'is', null)
+    // Los registrados sin cobro no generan pago al entrenador
+    .where('p.ventaId', 'is not', null)
     .where(sql`p.creado_en::date`, '<=', hasta)
     .orderBy('p.creadoEn');
   if (bloquear) q = q.forUpdate(['p']) as typeof q;

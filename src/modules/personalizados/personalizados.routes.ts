@@ -10,9 +10,9 @@ import { db } from '../../db/index.js';
 import { ah, parse } from '../../lib/http.js';
 import { convertir, fmt, MONEDA_REF, redondear } from '../../lib/monedas.js';
 import { hoy } from '../../lib/util.js';
-import { usuarioActual } from '../../middleware/auth.js';
+import { gestionCaja, usuarioActual } from '../../middleware/auth.js';
 import { getTasas } from '../tasas/tasas.service.js';
-import { personalizadosDeSocio, porLiquidar, tableroPersonalizados } from './personalizados.service.js';
+import { editarFechasPersonalizado, personalizadoSinCobro, personalizadosDeSocio, porLiquidar, tableroPersonalizados } from './personalizados.service.js';
 
 export const personalizadosRouter = Router();
 
@@ -42,6 +42,7 @@ personalizadosRouter.get(
         .selectFrom('personalizados')
         .select(['entrenadorId', 'precio', 'moneda', 'socioId'])
         .where('estado', '=', 'activa')
+        .where('ventaId', 'is not', null)
         .where(sql`creado_en::date`, '>=', mes)
         .execute();
       const liq = await porLiquidar(db, entrenadores.map((e) => e.id), h, (id) => entrenadores.find((e) => e.id === id)!.pagoMoneda, t);
@@ -83,6 +84,40 @@ personalizadosRouter.get(
       .filter((e) => e.tarifaTexto || e.clientes);
 
     res.json({ filas, entrenadores: resumen, totales });
+  }),
+);
+
+const fechaISO = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida');
+
+/** Registrar un personalizado sin cobro (solo dueño y administración). No suma a caja. */
+personalizadosRouter.post(
+  '/sin-cobro',
+  gestionCaja,
+  ah(async (req, res) => {
+    const b = parse(
+      z.object({ socioId: z.string().uuid(), entrenadorId: z.string().uuid(), fechaInicio: fechaISO, fechaFin: fechaISO, motivo: z.string().trim().min(3, 'Escribe el motivo').max(200) }),
+      req.body,
+    );
+    const u = usuarioActual(req);
+    const id = await personalizadoSinCobro({ ...b, usuarioId: u.id });
+    await db.insertInto('auditoria').values({ usuarioId: u.id, accion: 'personalizado.sin_cobro', detalle: JSON.stringify({ personalizadoId: id, ...b }) }).execute();
+    res.status(201).json({ id });
+  }),
+);
+
+/** Corregir las fechas de un personalizado (solo dueño y administración). No suma a caja. */
+personalizadosRouter.put(
+  '/:id',
+  gestionCaja,
+  ah(async (req, res) => {
+    const id = z.coerce.number().int().positive().parse(req.params.id);
+    const b = parse(z.object({ fechaInicio: fechaISO, fechaFin: fechaISO, motivo: z.string().trim().min(3, 'Escribe el motivo del cambio').max(200) }), req.body);
+    const r = await editarFechasPersonalizado(id, b.fechaInicio, b.fechaFin);
+    await db
+      .insertInto('auditoria')
+      .values({ usuarioId: usuarioActual(req).id, accion: 'personalizado.editado', detalle: JSON.stringify({ personalizadoId: id, antes: r.antes, despues: { fechaInicio: b.fechaInicio, fechaFin: b.fechaFin }, motivo: b.motivo }) })
+      .execute();
+    res.json({ ok: true });
   }),
 );
 

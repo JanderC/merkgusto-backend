@@ -121,7 +121,7 @@ sociosRouter.get(
       db
         .selectFrom('membresias as m')
         .innerJoin('planes as p', 'p.id', 'm.planId')
-        .select(['m.id', 'm.fechaInicio', 'm.fechaFin', 'm.estado', 'm.creadoEn', 'm.congeladaDesde', 'm.diasCongelados', 'm.grupoId', 'm.notas', 'p.nombre as plan', 'p.color', 'p.congelable', 'm.precio', 'm.moneda'])
+        .select(['m.id', 'm.planId', 'm.ventaId', 'm.fechaInicio', 'm.fechaFin', 'm.estado', 'm.creadoEn', 'm.congeladaDesde', 'm.diasCongelados', 'm.grupoId', 'm.notas', 'p.nombre as plan', 'p.color', 'p.congelable', 'm.precio', 'm.moneda'])
         .where('m.socioId', '=', s.id)
         .orderBy('m.fechaFin', 'desc')
         .limit(30)
@@ -246,6 +246,69 @@ sociosRouter.post(
     if (!m) throw badRequest('Solo se anulan aquí las cortesías. Las membresías vendidas se anulan anulando la venta.');
     await encolarSocio(req.params.id!);
     res.json({ ok: true });
+  }),
+);
+
+/**
+ * Editar una membresía (solo dueño y administración): corregir fechas o el plan.
+ * NO pasa por caja: no crea venta, no cambia el precio cobrado ni los totales. Queda en la auditoría.
+ */
+const fechaISO = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida');
+sociosRouter.put(
+  '/:id/membresias/:mid',
+  gestionCaja,
+  ah(async (req, res) => {
+    const b = parse(
+      z.object({
+        fechaInicio: fechaISO,
+        fechaFin: fechaISO,
+        planId: z.number().int().positive().optional(),
+        motivo: z.string().trim().min(3, 'Escribe el motivo del cambio').max(200),
+      }),
+      req.body,
+    );
+    if (b.fechaFin < b.fechaInicio) throw badRequest('La fecha de vencimiento no puede ser antes del inicio');
+    const m = await db
+      .selectFrom('membresias as m')
+      .innerJoin('planes as p', 'p.id', 'm.planId')
+      .select(['m.id', 'm.estado', 'm.fechaInicio', 'm.fechaFin', 'm.planId', 'p.nombre as plan', 'p.personas'])
+      .where('m.id', '=', req.params.mid!)
+      .where('m.socioId', '=', req.params.id!)
+      .executeTakeFirst();
+    if (!m) throw notFound('Membresía no encontrada');
+    if (m.estado !== 'activa') throw badRequest(m.estado === 'congelada' ? 'Reanuda la membresía antes de editarla' : 'Solo se editan membresías activas');
+    let plan = { id: m.planId, nombre: m.plan };
+    if (b.planId && b.planId !== m.planId) {
+      const p = await db.selectFrom('planes').select(['id', 'nombre', 'personas']).where('id', '=', b.planId).where('eliminadoEn', 'is', null).executeTakeFirst();
+      if (!p) throw badRequest('Plan no encontrado');
+      if (p.personas !== m.personas) throw badRequest(`Solo se puede cambiar por un plan de ${m.personas} persona(s)`);
+      plan = p;
+    }
+    const cambios = [
+      m.fechaInicio !== b.fechaInicio || m.fechaFin !== b.fechaFin ? `fechas ${m.fechaInicio}→${m.fechaFin} pasan a ${b.fechaInicio}→${b.fechaFin}` : null,
+      plan.id !== m.planId ? `plan ${m.plan} pasa a ${plan.nombre}` : null,
+    ].filter(Boolean);
+    if (!cambios.length) throw badRequest('No cambiaste nada');
+    const u = usuarioActual(req);
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable('membresias')
+        .set({
+          fechaInicio: b.fechaInicio,
+          fechaFin: b.fechaFin,
+          planId: plan.id,
+          notas: sql`coalesce(notas || ' · ', '') || ${`Editada el ${hoy()} por ${u.nombre}: ${cambios.join(', ')} (${b.motivo})`}` as never,
+        })
+        .where('id', '=', m.id)
+        .execute();
+      await trx
+        .insertInto('auditoria')
+        .values({ usuarioId: u.id, accion: 'membresia.editada', detalle: JSON.stringify({ socioId: req.params.id, membresiaId: m.id, antes: { fechaInicio: m.fechaInicio, fechaFin: m.fechaFin, planId: m.planId }, despues: { fechaInicio: b.fechaInicio, fechaFin: b.fechaFin, planId: plan.id }, motivo: b.motivo }) })
+        .execute();
+    });
+    // El lector se actualiza con la nueva vigencia
+    await encolarSocio(req.params.id!);
+    res.json({ ok: true, cambios });
   }),
 );
 
