@@ -39,7 +39,7 @@ export interface LineaCompra {
 const normal = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 
 /**
- * Carga de factura: el ÚNICO camino por el que entra mercancía.
+ * Carga de factura (o entrada rápida de un producto, que usa este mismo camino).
  *  1. La factura viene en $, Bs o pesos. Cada costo se convierte a la moneda del
  *     producto con la tasa de la factura (la del día o la que se escriba) y la
  *     tasa queda guardada en la compra.
@@ -59,7 +59,8 @@ export async function registrarCompra(
     /** Total impreso en la factura: si no cuadra con las líneas, no se guarda */
     totalFactura?: number | null;
     items: LineaCompra[];
-    pago: { metodo: string; monto?: number | null } | null;
+    /** turnoId: se pagó con el dinero de esa caja abierta (sale de su turno) */
+    pago: { metodo: string; monto?: number | null; turnoId?: string | null } | null;
     nota?: string | null;
     soporteId?: number | null;
   },
@@ -186,7 +187,7 @@ export async function registrarCompra(
       }
     }
 
-    if (input.pago && pagado > 0) await pagarCompraTrx(trx, { compraId: compra.id, usuarioId, metodo: input.pago.metodo, moneda: input.moneda, monto: pagado, concepto: ref, tasas: t, ajustarSaldo: false });
+    if (input.pago && pagado > 0) await pagarCompraTrx(trx, { compraId: compra.id, usuarioId, metodo: input.pago.metodo, moneda: input.moneda, monto: pagado, concepto: ref, tasas: t, ajustarSaldo: false, turnoId: input.pago.turnoId ?? null });
     await trx
       .insertInto('auditoria')
       .values({ usuarioId, accion: 'compra.registrada', detalle: JSON.stringify({ compraId: compra.id, factura, total, moneda: input.moneda, pagado, items: input.items.length, creados, tasa: { dolar: t.usdCop, bs: t.vesCop } }) })
@@ -195,8 +196,8 @@ export async function registrarCompra(
   });
 }
 
-async function pagarCompraTrx(trx: Db, a: { compraId: number; usuarioId: string; metodo: string; moneda: Moneda; monto: number; concepto: string; tasas?: Tasas; ajustarSaldo: boolean }) {
-  const mov = await egresoAdministracion(trx, { usuarioId: a.usuarioId, categoria: CATEGORIA_COMPRAS, concepto: a.concepto, metodo: a.metodo, moneda: a.moneda, monto: a.monto, tasas: a.tasas });
+async function pagarCompraTrx(trx: Db, a: { compraId: number; usuarioId: string; metodo: string; moneda: Moneda; monto: number; concepto: string; tasas?: Tasas; ajustarSaldo: boolean; turnoId?: string | null }) {
+  const mov = await egresoAdministracion(trx, { usuarioId: a.usuarioId, categoria: CATEGORIA_COMPRAS, concepto: a.concepto, metodo: a.metodo, moneda: a.moneda, monto: a.monto, tasas: a.tasas, turnoId: a.turnoId });
   await trx.insertInto('compraPagos').values({ compraId: a.compraId, movimientoId: mov.id, metodo: a.metodo, moneda: a.moneda, monto: a.monto, registradoPor: a.usuarioId }).execute();
   if (a.ajustarSaldo) {
     await trx

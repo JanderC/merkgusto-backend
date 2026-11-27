@@ -395,15 +395,20 @@ export async function registrarMovimiento(
  */
 export async function egresoAdministracion(
   dbx: Db,
-  m: { usuarioId: string; categoria: string; concepto: string; metodo: string; moneda: Moneda; monto: number; referencia?: string | null; tasas?: Tasas },
+  m: { usuarioId: string; categoria: string; concepto: string; metodo: string; moneda: Moneda; monto: number; referencia?: string | null; tasas?: Tasas; turnoId?: string | null },
 ) {
   (await metodosActivos(dbx))(m.metodo, m.moneda);
+  // Pagado con el dinero de una caja abierta: sale de ese turno (lo descuenta su cierre)
+  if (m.turnoId) {
+    const t = await dbx.selectFrom('turnos').select('id').where('id', '=', m.turnoId).where('estado', '=', 'abierto').executeTakeFirst();
+    if (!t) throw conflict('Esa caja ya no está abierta: elige otra o márcalo como pagado por administración');
+  }
   const t = m.tasas ?? (await getTasas());
   const monto = redondear(m.monto, m.moneda);
   return dbx
     .insertInto('cajaMovimientos')
     .values({
-      turnoId: null,
+      turnoId: m.turnoId ?? null,
       usuarioId: m.usuarioId,
       tipo: 'egreso',
       categoria: m.categoria,

@@ -4,9 +4,10 @@ import { z } from 'zod';
 import { db } from '../../db/index.js';
 import { ah, badRequest, conflict, notFound, parse } from '../../lib/http.js';
 import { diasEntre, hoy } from '../../lib/util.js';
-import { soloDueno, usuarioActual } from '../../middleware/auth.js';
+import { gestionCaja, soloDueno, usuarioActual } from '../../middleware/auth.js';
 import { encolarSocio } from '../biometric/biometric-sync.service.js';
-import { convertir } from '../../lib/monedas.js';
+import { convertir, fmt } from '../../lib/monedas.js';
+import { registrarCompra } from '../inventario/inventario.service.js';
 import { moverStock } from '../inventario/kardex.js';
 import { getTasas } from '../tasas/tasas.service.js';
 import { describirDuracion, diasAproximados } from '../membresias/membresias.service.js';
@@ -286,34 +287,70 @@ productosRouter.get(
   }),
 );
 
-const SOLO_FACTURA = 'La mercancía solo entra cargando su factura en Inventario › Compras';
-
 /**
- * Aquí solo nacen los SERVICIOS (sin inventario). Los productos con inventario
- * se crean al cargar la factura de compra, con su costo y su precio.
+ * PRODUCTOS E INVENTARIO (dueño y administración).
+ *  • Crear: un servicio (sin inventario) o un producto con su cantidad inicial y costo.
+ *  • Entrada: llegó mercancía (cantidad + costo). Usa el mismo camino que la factura de
+ *    compra: costo promedio, historial y pago (por administración, de una caja abierta o a crédito).
+ *  • Salida: merma, rotura, vencido o consumo interno.
+ *  • Ajustar: lo que hay de verdad en el estante; la diferencia queda en el historial.
+ * Todo movimiento de unidades queda en el kardex con quién, cuándo y por qué.
  */
+const normal = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+
+async function nombreYCodigoLibres(nombre: string | null, codigo: string | null, excepto?: number) {
+  if (nombre) {
+    let q = db.selectFrom('productos').select('nombre').where(sql<string>`lower(regexp_replace(trim(nombre), '\\s+', ' ', 'g'))`, '=', normal(nombre));
+    if (excepto) q = q.where('id', '!=', excepto);
+    const mismo = await q.executeTakeFirst();
+    if (mismo) throw conflict(`«${mismo.nombre}» ya existe: búscalo en la lista y usa Entrada para sumarle`);
+  }
+  if (codigo) {
+    let qc = db.selectFrom('productos').select('nombre').where('codigoBarras', '=', codigo);
+    if (excepto) qc = qc.where('id', '!=', excepto);
+    const cod = await qc.executeTakeFirst();
+    if (cod) throw conflict(`El código ${codigo} ya es de «${cod.nombre}»`);
+  }
+}
+
 productosRouter.post(
   '/',
-  soloDueno,
+  gestionCaja,
   ah(async (req, res) => {
-    const { stock: _s, costo: _c, ...b } = parse(productoSchema, req.body);
-    if (b.controlaStock) throw badRequest(`${SOLO_FACTURA}: ahí se crea el producto nuevo`);
-    res.status(201).json(await db.insertInto('productos').values({ ...b, costo: 0, stock: 0 }).returningAll().executeTakeFirstOrThrow());
+    const b = parse(productoSchema, req.body);
+    await nombreYCodigoLibres(b.nombre, b.codigoBarras ?? null);
+    const u = usuarioActual(req);
+    const nombre = b.nombre.replace(/\s+/g, ' ');
+    if (!b.controlaStock) {
+      const p = await db.insertInto('productos').values({ ...b, nombre, costo: 0, stock: 0 }).returningAll().executeTakeFirstOrThrow();
+      return void res.status(201).json(p);
+    }
+    if (!(b.precio > 0)) throw badRequest('Ponle precio de venta');
+    if (b.stock > 0 && !(b.costo > 0)) throw badRequest('Escribe cuánto te costó cada unidad (para saber la ganancia)');
+    if (b.costo > 0 && b.precio < b.costo) throw badRequest(`Se vendería a ${fmt(b.precio, b.moneda)} y cuesta ${fmt(b.costo, b.moneda)}: el precio queda por debajo del costo`);
+    const p = await db.transaction().execute(async (trx) => {
+      const n = await trx.insertInto('productos').values({ ...b, nombre, costo: b.costo, stock: 0 }).returning('id').executeTakeFirstOrThrow();
+      if (b.stock > 0) await moverStock(trx, { productoId: n.id, cantidad: b.stock, tipo: 'ajuste', referencia: `Inventario inicial (costo ${fmt(b.costo, b.moneda)} c/u)`, usuarioId: u.id });
+      await trx.insertInto('auditoria').values({ usuarioId: u.id, accion: 'producto.creado', detalle: JSON.stringify({ productoId: n.id, nombre, stockInicial: b.stock, costo: b.costo, precio: b.precio, moneda: b.moneda }) }).execute();
+      return trx.selectFrom('productos').selectAll().where('id', '=', n.id).executeTakeFirstOrThrow();
+    });
+    res.status(201).json(p);
   }),
 );
 
-/** Editar nombre, precio, código… El stock y el costo NO: vienen de las facturas y los conteos. */
+/** Editar nombre, precio, código, mínimo… Las unidades cambian solo con Entrada, Salida o Ajustar (quedan en el historial). */
 productosRouter.put(
   '/:id',
-  soloDueno,
+  gestionCaja,
   ah(async (req, res) => {
     const { stock, costo: _c, ...b } = parse(productoSchema.partial(), req.body);
     const id = Number(req.params.id);
     const u = usuarioActual(req);
+    await nombreYCodigoLibres(b.nombre ?? null, b.codigoBarras ?? null, id);
     const p = await db.transaction().execute(async (trx) => {
       const antes = await trx.selectFrom('productos').select(['stock', 'costo', 'moneda', 'precio', 'controlaStock']).where('id', '=', id).forUpdate().executeTakeFirst();
       if (!antes) throw notFound('Producto no encontrado');
-      if (stock !== undefined && stock !== antes.stock) throw badRequest(`${SOLO_FACTURA}. Para corregir lo que hay en el estante usa el conteo físico.`);
+      if (stock !== undefined && stock !== antes.stock) throw badRequest('Las unidades no se cambian aquí: usa Entrada, Salida o Ajustar (así queda en el historial)');
       // Si cambia la moneda de venta, el costo se pasa a la nueva moneda con la tasa de hoy
       const cambios: Record<string, unknown> = { ...b };
       if (b.moneda && b.moneda !== antes.moneda && Number(antes.costo) > 0) cambios.costo = Math.round(convertir(Number(antes.costo), antes.moneda, b.moneda, await getTasas()) * 100) / 100;
@@ -327,21 +364,76 @@ productosRouter.put(
   }),
 );
 
-/** Salida manual (merma, rotura, consumo interno). Sumar mercancía solo por factura. */
+async function productoConInventario(id: number) {
+  const p = await db.selectFrom('productos').select(['id', 'nombre', 'controlaStock', 'stock', 'moneda']).where('id', '=', id).executeTakeFirst();
+  if (!p) throw notFound('Producto no encontrado');
+  if (!p.controlaStock) throw badRequest(`«${p.nombre}» es un servicio sin inventario. Edítalo y activa "Lleva inventario" si se vende por unidad.`);
+  return p;
+}
+
+/**
+ * Entrada (cantidad > 0): llegó mercancía. Se registra como una compra (costo promedio, historial y pago).
+ * Salida (cantidad < 0): merma, rotura, vencido o consumo interno.
+ */
 productosRouter.post(
   '/:id/entrada',
-  soloDueno,
+  gestionCaja,
   ah(async (req, res) => {
-    const { cantidad, motivo } = parse(
-      z.object({ cantidad: z.number().int().min(-100_000).max(-1, SOLO_FACTURA), motivo: z.string().trim().min(3, 'Escribe el motivo de la salida').max(150) }),
+    const b = parse(
+      z.object({
+        cantidad: z.number().int().min(-100_000).max(100_000).refine((n) => n !== 0, 'La cantidad no puede ser 0'),
+        motivo: z.string().trim().max(150).nullish(),
+        // Solo entrada
+        costoUnitario: z.number().min(0).max(1e12).nullish(),
+        moneda: moneda.nullish(),
+        precioVenta: z.number().min(0).max(1e12).nullish(),
+        proveedorId: z.number().int().positive().nullish(),
+        factura: z.string().trim().max(40).nullish(),
+        pago: z.object({ metodo: z.string().max(20), turnoId: z.string().uuid().nullish() }).nullish(),
+      }),
       req.body,
     );
     const id = Number(req.params.id);
-    const actual = await db.selectFrom('productos').select(['id', 'controlaStock', 'stock']).where('id', '=', id).executeTakeFirst();
-    if (!actual) throw notFound('Producto no encontrado');
-    if (!actual.controlaStock) throw badRequest('Este producto no lleva control de inventario');
-    if (-cantidad > actual.stock) throw badRequest(`Solo hay ${actual.stock} en el inventario`);
-    await moverStock(db, { productoId: id, cantidad, tipo: 'ajuste', referencia: `Salida: ${motivo}`, usuarioId: usuarioActual(req).id });
+    const u = usuarioActual(req);
+    const p = await productoConInventario(id);
+    if (b.cantidad < 0) {
+      const motivo = b.motivo?.trim() ?? '';
+      if (motivo.length < 3) throw badRequest('Escribe el motivo de la salida');
+      if (-b.cantidad > p.stock) throw badRequest(`Solo hay ${p.stock} en el inventario`);
+      await moverStock(db, { productoId: id, cantidad: b.cantidad, tipo: 'ajuste', referencia: `Salida: ${motivo}`, usuarioId: u.id });
+    } else {
+      if (b.costoUnitario == null) throw badRequest('Escribe cuánto costó cada unidad');
+      await registrarCompra(u.id, {
+        proveedorId: b.proveedorId ?? null,
+        factura: b.factura ?? null,
+        moneda: b.moneda ?? p.moneda,
+        items: [{ productoId: id, cantidad: b.cantidad, costoUnitario: b.costoUnitario, precioVenta: b.precioVenta ?? null }],
+        pago: b.pago ? { metodo: b.pago.metodo, turnoId: b.pago.turnoId ?? null } : null,
+        nota: b.motivo?.trim() ? `Entrada rápida: ${b.motivo.trim()}` : 'Entrada rápida',
+      });
+    }
     res.json(await db.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow());
+  }),
+);
+
+/** Ajustar al conteo: "en el estante hay N". La diferencia queda en el historial con el motivo. */
+productosRouter.post(
+  '/:id/ajuste',
+  gestionCaja,
+  ah(async (req, res) => {
+    const b = parse(z.object({ contado: z.number().int().min(0).max(1_000_000), motivo: z.string().trim().min(3, 'Escribe por qué no cuadraba').max(150) }), req.body);
+    const id = Number(req.params.id);
+    const u = usuarioActual(req);
+    const r = await db.transaction().execute(async (trx) => {
+      const p = await trx.selectFrom('productos').select(['id', 'nombre', 'controlaStock', 'stock']).where('id', '=', id).forUpdate().executeTakeFirst();
+      if (!p) throw notFound('Producto no encontrado');
+      if (!p.controlaStock) throw badRequest(`«${p.nombre}» es un servicio sin inventario`);
+      const dif = b.contado - p.stock;
+      if (dif === 0) throw badRequest(`El sistema ya dice ${p.stock}: no hay nada que ajustar`);
+      await moverStock(trx, { productoId: id, cantidad: dif, tipo: 'conteo', referencia: `Ajuste: el sistema decía ${p.stock}, se contaron ${b.contado} · ${b.motivo}`, usuarioId: u.id });
+      await trx.insertInto('auditoria').values({ usuarioId: u.id, accion: 'producto.ajuste', detalle: JSON.stringify({ productoId: id, antes: p.stock, contado: b.contado, diferencia: dif, motivo: b.motivo }) }).execute();
+      return { antes: p.stock, diferencia: dif };
+    });
+    res.json({ ...(await db.selectFrom('productos').selectAll().where('id', '=', id).executeTakeFirstOrThrow()), ajuste: r });
   }),
 );

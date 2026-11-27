@@ -137,8 +137,10 @@ check((await call('POST', `/inventario/compras/${f2.j.id}/anular`, { motivo: 'ca
 const g3 = await stockDe(g.id);
 check(g3.stock === 18 && Number(g3.precio) === 6000 && Number(g3.costo) === 3960, 'al anular vuelven el stock, el costo y el precio de antes', g3);
 
-console.log('\n── Solo por factura');
-check((await call('POST', '/productos', { nombre: `Suelto ${sfx}`, precio: 1000 }, D)).s === 400, 'un producto con inventario no se crea fuera de la factura');
+console.log('\n── Producto suelto (sin factura)');
+check((await call('POST', '/productos', { nombre: `Suelto ${sfx}`, precio: 1000, stock: 50 }, D)).s === 400, 'con unidades iniciales y sin costo no se crea (no hay stock regalado)');
+const suelto = await call('POST', '/productos', { nombre: `Suelto ${sfx}`, precio: 1000, stock: 5, costo: 600 }, D);
+check(suelto.s === 201 && suelto.j.stock === 5, 'se crea con su cantidad inicial y su costo', suelto.j);
 const serv = await call('POST', '/productos', { nombre: `Toalla ${sfx}`, precio: 2000, controlaStock: false }, D);
 check(serv.s === 201 && serv.j.stock === 0, 'un servicio sin inventario sí se crea en el catálogo', serv.j);
 check((await call('POST', '/inventario/compras', { moneda: 'COP', items: [{ productoId: serv.j.id, cantidad: 1, costoUnitario: 100, precioVenta: 2000 }], pago: null }, D)).s === 400, 'un servicio no se compra por factura');

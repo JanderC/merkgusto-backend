@@ -43,7 +43,7 @@ const compra = await call('POST', '/inventario/compras', { moneda: 'COP', items:
 const prod = { s: compra.s, j: (await call('GET', '/productos', null, D)).j.find((p) => p.id === compra.j.productos?.[0]?.id) };
 check(prod.s === 201 && prod.j?.codigoBarras === barras && prod.j.stock === 10, 'producto creado en su factura con código de barras', compra.j);
 const dup = await call('POST', '/productos', { nombre: `Otro ${sfx}`, precio: 1000, moneda: 'COP', codigoBarras: barras, controlaStock: false }, D);
-check(dup.s === 409 && /código de barras/.test(dup.j?.message), 'código repetido rechazado con mensaje claro', dup.j);
+check(dup.s === 409 && /código/.test(dup.j?.message), 'código repetido rechazado con mensaje claro', dup.j);
 check((await call('POST', '/productos', { nombre: `Mal ${sfx}`, precio: 1, codigoBarras: 'ab cd$', controlaStock: false }, D)).s === 400, 'código con caracteres raros rechazado');
 const sinCod = await call('POST', '/productos', { nombre: `Sin código ${sfx}`, precio: 2000, moneda: 'COP', controlaStock: false, codigoBarras: '' }, D);
 check(sinCod.s === 201 && sinCod.j.codigoBarras === null, 'código vacío se guarda como "sin código"');

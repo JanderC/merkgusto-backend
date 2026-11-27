@@ -140,7 +140,7 @@ inventarioRouter.post(
           )
           .min(1, 'Agrega al menos un producto')
           .max(100),
-        pago: z.object({ metodo: z.string().max(20), monto: z.number().positive().max(1e13).nullish() }).nullable(),
+        pago: z.object({ metodo: z.string().max(20), monto: z.number().positive().max(1e13).nullish(), turnoId: z.string().uuid().nullish() }).nullable(),
         nota: z.string().trim().max(300).nullish(),
         soporte: z.string().max(6_000_000).nullish(),
       }),
