@@ -27,6 +27,7 @@ import { encolarSocio } from '../biometric/biometric-sync.service.js';
 import { getConfig } from '../configuracion/config.service.js';
 import { crearMembresias, describirDuracion, type DesdeRenovacion } from '../membresias/membresias.service.js';
 import { moverStock } from '../inventario/kardex.js';
+import { anularClasesDeVenta, inscribirPagado, prepararClase } from '../clases/clases-cobro.js';
 import { anularPersonalizadosDeVenta, crearPersonalizado, prepararPersonalizado, type ItemPersonalizado } from '../personalizados/personalizados.service.js';
 import { getTasas } from '../tasas/tasas.service.js';
 
@@ -34,7 +35,8 @@ export type ItemVentaInput =
   | { tipo: 'membresia'; id: number; acompanantes?: string[]; desde?: DesdeRenovacion; /** Se inscribió días antes: la mensualidad cuenta desde ese día */ inicio?: string }
   | { tipo: 'producto'; id: number; cantidad: number }
   | { tipo: 'abono'; deudaId: number; monto: number }
-  | ({ tipo: 'personalizado' } & ItemPersonalizado);
+  | ({ tipo: 'personalizado' } & ItemPersonalizado)
+  | { tipo: 'clase'; claseId: number };
 
 export interface PagoInput {
   metodo: string;
@@ -73,7 +75,7 @@ export async function metodosActivos(dbx: Db) {
 }
 
 type Linea = {
-  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado';
+  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado' | 'clase';
   referenciaId: number;
   descripcion: string;
   cantidad: number;
@@ -82,6 +84,9 @@ type Linea = {
   subtotal: number;
   datos: Record<string, unknown> | null;
 };
+
+/** Rutina / pase del día de una sola persona que entra por recepción: se vende sin elegir cliente. */
+export const esPaseSinCliente = (p: { accesoLector: boolean; personas: number; tipoDuracion: string; cantidad: number }) => !p.accesoLector && p.personas === 1 && p.tipoDuracion === 'dias' && p.cantidad === 1;
 
 export async function registrarVenta(
   cajeroId: string,
@@ -103,8 +108,15 @@ export async function registrarVenta(
     const membresiasPedidas: Array<{ planId: number; socios: string[]; desde: DesdeRenovacion; inicio?: string; idx: number }> = [];
     const abonos: Array<{ deudaId: number; monto: number }> = [];
     const personalizados: Array<{ idx: number; item: ItemPersonalizado; datos: Awaited<ReturnType<typeof prepararPersonalizado>> }> = [];
+    const clases: Array<Awaited<ReturnType<typeof prepararClase>>> = [];
     for (const it of input.items) {
-      if (it.tipo === 'personalizado') {
+      if (it.tipo === 'clase') {
+        if (!input.socioId) throw badRequest('Para cobrar una clase elige a la persona (o regístrala rápido): queda inscrita en la clase');
+        if (clases.some((x) => x.clase.id === it.claseId)) throw badRequest('Esa clase ya está en el ticket');
+        const cl = await prepararClase(trx, input.socioId, it.claseId);
+        clases.push(cl);
+        lineas.push({ tipo: 'clase', referenciaId: cl.clase.id, descripcion: cl.descripcion, cantidad: 1, moneda: cl.moneda, precioUnitario: cl.precio, subtotal: cl.precio, datos: { claseId: cl.clase.id, dia: cl.clase.dia, hora: cl.clase.hora } });
+      } else if (it.tipo === 'personalizado') {
         if (!input.socioId) throw badRequest('Para cobrar un personalizado elige al cliente');
         if (personalizados.some((x) => x.item.entrenadorId === it.entrenadorId)) throw badRequest('Ese personalizado ya está en el ticket');
         const pz = await prepararPersonalizado(trx, input.socioId, it);
@@ -121,9 +133,23 @@ export async function registrarVenta(
           datos: { entrenadorId: pz.entrenador.id, entrenador: pz.nombre, periodo: it.periodo, cantidad: it.cantidad, inicio: pz.inicio, fin: pz.fin, comision: pz.comision },
         });
       } else if (it.tipo === 'membresia') {
-        if (!input.socioId) throw badRequest('Para vender un plan elige al cliente');
         const p = await trx.selectFrom('planes').selectAll().where('id', '=', it.id).executeTakeFirst();
         if (!p || !p.activo) throw badRequest('Plan no disponible');
+        if (!input.socioId) {
+          // Rutina / pase del día: entra por recepción, no abre el lector → se puede cobrar sin cliente
+          if (!esPaseSinCliente(p)) throw badRequest(`Para vender ${p.nombre} elige al cliente (abre el lector o dura más de un día)`);
+          lineas.push({
+            tipo: 'membresia',
+            referenciaId: p.id,
+            descripcion: `${p.nombre} (${describirDuracion(p)}) · sin cliente`,
+            cantidad: 1,
+            moneda: p.moneda,
+            precioUnitario: Number(p.precio),
+            subtotal: Number(p.precio),
+            datos: { sinCliente: true },
+          });
+          continue;
+        }
         const socios = [input.socioId, ...(it.acompanantes ?? [])];
         if (socios.length !== p.personas) throw badRequest(`El plan ${p.nombre} es para ${p.personas} persona(s): elige ${p.personas - 1} acompañante(s)`);
         if (it.inicio) {
@@ -313,6 +339,8 @@ export async function registrarVenta(
       await trx.updateTable('ventaItems').set({ referenciaId: id }).where('id', '=', itemsGuardados[pz.idx]!.id).execute();
       personalizadosHechos.push({ entrenador: pz.datos.nombre, inicio: pz.datos.inicio, fin: pz.datos.fin });
     }
+    // Clases pagadas: queda inscrito con su ticket
+    for (const cl of clases) await inscribirPagado(trx, { claseId: cl.clase.id, socioId: input.socioId!, ventaId: venta.id, usuarioId: cajeroId, inscripcionId: cl.inscripcionId });
     // Pago parcial → deuda del cliente
     let deuda: { id: number; saldo: number; texto: string } | null = null;
     if (deudaRef > 0 && input.socioId) {
@@ -331,7 +359,7 @@ export async function registrarVenta(
         .executeTakeFirstOrThrow();
       deuda = { id: d.id, saldo: deudaRef, texto: fmtTodas(deudaRef, MONEDA_REF, t) };
     }
-    return { venta, lineas, totales, membresias, personalizados: personalizadosHechos, deuda, vuelto };
+    return { venta, lineas, totales, membresias, personalizados: personalizadosHechos, clases: clases.map((c) => ({ nombre: c.clase.nombre, dia: c.clase.dia, hora: c.clase.hora })), deuda, vuelto };
   });
 
   // Fuera de la transacción: el lector nunca bloquea una venta
@@ -346,6 +374,7 @@ export async function registrarVenta(
     items: r.lineas.map((l) => ({ descripcion: l.descripcion, cantidad: l.cantidad, precio: fmt(l.subtotal, l.moneda) })),
     membresias: r.membresias.map((m) => ({ plan: m.plan, fechaInicio: m.inicio, fechaFin: m.fin, personas: m.socioIds.length })),
     personalizados: r.personalizados.map((p) => ({ entrenador: p.entrenador, fechaInicio: p.inicio, fechaFin: p.fin })),
+    clases: r.clases,
     vuelto: r.vuelto ? { moneda: r.vuelto.moneda, monto: r.vuelto.monto, texto: fmt(r.vuelto.monto, r.vuelto.moneda) } : null,
     deuda: r.deuda,
   };
@@ -709,6 +738,7 @@ export async function anularVenta(ventaId: string, usuarioId: string, motivo: st
       }
     }
     await anularPersonalizadosDeVenta(trx, ventaId);
+    await anularClasesDeVenta(trx, ventaId);
     const membs = await trx.updateTable('membresias').set({ estado: 'anulada' }).where('ventaId', '=', ventaId).returning('socioId').execute();
     await trx.updateTable('deudas').set({ estado: 'anulada', actualizadoEn: sql`now()` as never }).where('ventaId', '=', ventaId).execute();
     await trx

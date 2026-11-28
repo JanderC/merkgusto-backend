@@ -9,6 +9,8 @@ import { guardarArchivo } from '../archivos/archivos.service.js';
 import { getConfig } from '../configuracion/config.service.js';
 import { describirDuracion } from '../membresias/membresias.service.js';
 import { tasaVigente } from '../tasas/tasas.service.js';
+import { baseClases, coberturas, diaLocal } from '../clases/clases.routes.js';
+import { hoy, sumarDias } from '../../lib/util.js';
 import { abrirTurno, anularMovimiento, anularVenta, cerrarTurno, registrarMovimiento, registrarVenta, resumenTurnos, vistaCiegaTurno } from './caja.service.js';
 import { listarDevoluciones, registrarDevolucion, ticketParaDevolucion } from './devoluciones.service.js';
 import { cajaEnVivo } from './caja-vivo.js';
@@ -86,6 +88,53 @@ posRouter.get(
   }),
 );
 
+/**
+ * Clases con precio que se pueden cobrar (hoy y los próximos 7 días).
+ * Con ?socioId dice si esa persona ya está cubierta (mensualidad / plan) o ya pagó.
+ */
+posRouter.get(
+  '/clases',
+  ah(async (req, res) => {
+    const q = parse(z.object({ socioId: z.string().uuid().optional() }), req.query);
+    const h = hoy();
+    const filas = await baseClases()
+      .where(diaLocal, '>=', h)
+      .where(diaLocal, '<=', sumarDias(h, 7))
+      .where('c.estado', '=', 'programada')
+      .where('c.precio', '>', 0 as never)
+      .orderBy('c.inicio')
+      .execute();
+    const ahora = Date.now();
+    const visibles = filas.filter((c) => new Date(c.inicio).getTime() + c.duracionMin * 60_000 > ahora);
+    const estado = new Map<number, { cubierto: string | null; pagado: boolean; inscrito: boolean }>();
+    if (q.socioId && visibles.length) {
+      const ins = await db.selectFrom('claseInscritos').select(['claseId', 'ventaId']).where('socioId', '=', q.socioId).where('claseId', 'in', visibles.map((c) => c.id)).execute();
+      for (const c of visibles) {
+        const cob = (await coberturas([q.socioId], c.planId, c.dia)).get(q.socioId)!;
+        const i = ins.find((x) => x.claseId === c.id);
+        estado.set(c.id, { cubierto: cob.acceso === 'sin_mensualidad' ? null : (cob.plan ?? 'mensualidad'), pagado: !!i?.ventaId, inscrito: !!i });
+      }
+    }
+    res.json(
+      visibles.map((c) => ({
+        id: c.id,
+        nombre: c.nombre,
+        dia: c.dia,
+        hora: c.hora,
+        color: c.color,
+        entrenador: c.entrenador,
+        precio: Number(c.precio),
+        moneda: c.moneda,
+        cupo: c.cupo,
+        inscritos: c.inscritos,
+        lleno: !!c.cupo && c.inscritos >= c.cupo,
+        esHoy: c.dia === h,
+        ...(estado.get(c.id) ?? {}),
+      })),
+    );
+  }),
+);
+
 posRouter.get(
   '/turno',
   ah(async (req, res) => {
@@ -105,6 +154,7 @@ const itemSchema = z.discriminatedUnion('tipo', [
   z.object({ tipo: z.literal('membresia'), id: z.number().int().positive(), acompanantes: z.array(z.string().uuid()).max(9).optional(), desde: z.enum(['continuar', 'hoy']).optional(), inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }),
   z.object({ tipo: z.literal('producto'), id: z.number().int().positive(), cantidad: z.number().int().min(1).max(500) }),
   z.object({ tipo: z.literal('abono'), deudaId: z.number().int().positive(), monto: z.number().positive().max(1e12) }),
+  z.object({ tipo: z.literal('clase'), claseId: z.number().int().positive() }),
   z.object({ tipo: z.literal('personalizado'), entrenadorId: z.string().uuid(), periodo: z.enum(['meses', 'semanas']), cantidad: z.number().int().min(1).max(12), desde: z.enum(['continuar', 'hoy']).optional() }),
 ]);
 

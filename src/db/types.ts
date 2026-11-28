@@ -161,7 +161,7 @@ export interface VentasTable {
 export interface VentaItemsTable {
   id: Generated<number>;
   ventaId: string;
-  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado';
+  tipo: 'membresia' | 'producto' | 'abono' | 'personalizado' | 'clase';
   referenciaId: number;
   descripcion: string;
   cantidad: number;
@@ -334,6 +334,9 @@ export interface ClasesTable {
   serieId: string | null;
   creadoPor: string | null;
   creadoEn: Generated<Date>;
+  /** Precio para quien no tiene mensualidad (null = sin precio: se deja pasar o es cortesía) */
+  precio: ColumnType<string | null, number | string | null | undefined, number | string | null>;
+  moneda: ColumnType<Moneda, Moneda | undefined, Moneda>;
 }
 
 export interface ClaseInscritosTable {
@@ -350,6 +353,8 @@ export interface ClaseInscritosTable {
   inscritoPorEntrenador: ColumnType<string | null, string | null | undefined, string | null>;
   pasoPorEntrenador: ColumnType<string | null, string | null | undefined, string | null>;
   reservadoPorSocio: Generated<boolean>;
+  /** Ticket con el que pagó la clase */
+  ventaId: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface AsistenciasTable {

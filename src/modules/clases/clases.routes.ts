@@ -44,6 +44,9 @@ export const claseSchema = z.object({
   nivel: z.enum(['principiante', 'intermedio', 'avanzado', 'todos']).nullish(),
   caracteristicas: z.record(z.enum(CARACTERISTICAS as [CaracteristicaClase, ...CaracteristicaClase[]]), z.number().int().min(0).max(5)).default({}),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).default('#FF8A10'),
+  /** Precio para quien no tiene mensualidad (bailoterapia…). Vacío o 0 = sin precio */
+  precio: z.number().min(0).max(1e12).nullish(),
+  moneda: z.enum(['USD', 'VES', 'COP']).default('COP'),
   /** Al crear: repetir la misma clase N semanas más */
   repetirSemanas: z.number().int().min(0).max(26).default(0),
 });
@@ -76,10 +79,13 @@ export const baseClases = () =>
       'c.estado',
       'c.motivoCancelacion',
       'c.serieId',
+      'c.precio',
+      'c.moneda',
       diaLocal.as('dia'),
       sql<string>`to_char(c.inicio at time zone ${sql.lit(TZ)}, 'HH24:MI')`.as('hora'),
       sql<number>`(select count(*)::int from clase_inscritos i where i.clase_id = c.id)`.as('inscritos'),
       sql<number>`(select count(*)::int from clase_inscritos i where i.clase_id = c.id and i.asistio_en is not null)`.as('asistieron'),
+      sql<number>`(select count(*)::int from clase_inscritos i where i.clase_id = c.id and i.venta_id is not null)`.as('pagaron'),
     ]);
 
 /** Entrenadores y planes para el formulario (la cajera no tiene acceso al módulo de entrenadores). */
@@ -148,8 +154,11 @@ clasesRouter.get(
       .selectFrom('claseInscritos as i')
       .innerJoin('socios as s', 's.id', 'i.socioId')
       .leftJoin('usuarios as u', 'u.id', 'i.pasoPor')
+      .leftJoin('ventas as v', 'v.id', 'i.ventaId')
       .select([
         'i.socioId',
+        'i.ventaId',
+        'v.numero as ticket',
         'i.cobertura',
         'i.asistioEn',
         'i.nota',
@@ -213,6 +222,8 @@ clasesRouter.post(
       nivel: b.nivel ?? null,
       caracteristicas: limpiarCar(b.caracteristicas),
       color: b.color,
+      precio: b.precio && b.precio > 0 ? b.precio : null,
+      moneda: b.moneda,
       serieId,
       creadoPor: u.id,
     }));
@@ -242,6 +253,8 @@ clasesRouter.put(
         ...(b.nivel !== undefined && { nivel: b.nivel ?? null }),
         ...(b.caracteristicas !== undefined && { caracteristicas: limpiarCar(b.caracteristicas) }),
         ...(b.color !== undefined && { color: b.color }),
+        ...(b.precio !== undefined && { precio: b.precio && b.precio > 0 ? b.precio : null }),
+        ...(b.moneda !== undefined && { moneda: b.moneda }),
       })
       .where('id', '=', id)
       .execute();
@@ -290,6 +303,7 @@ clasesRouter.delete(
     const id = Number(req.params.id);
     const c = await cargarClase(id);
     if (c.asistieron) throw conflict('Ya hay gente que asistió a esta clase: cancélala en vez de borrarla');
+    if (c.pagaron) throw conflict('Hay gente que ya pagó esta clase: cancélala en vez de borrarla (y anula sus tickets si les devuelves el dinero)');
     await db.deleteFrom('clases').where('id', '=', id).execute();
     res.json({ ok: true });
   }),
@@ -329,6 +343,8 @@ export async function inscribirEnClase(claseId: number, socioIds: string[], por:
 clasesRouter.delete(
   '/:id/inscritos/:socioId',
   ah(async (req, res) => {
+    const pago = await db.selectFrom('claseInscritos as i').innerJoin('ventas as v', 'v.id', 'i.ventaId').select('v.numero').where('i.claseId', '=', Number(req.params.id)).where('i.socioId', '=', req.params.socioId!).executeTakeFirst();
+    if (pago) throw conflict(`Pagó la clase con el ticket #${pago.numero}: para quitarlo, anula ese ticket (así se le devuelve el dinero)`);
     const r = await db.deleteFrom('claseInscritos').where('claseId', '=', Number(req.params.id)).where('socioId', '=', req.params.socioId!).where('asistioEn', 'is', null).executeTakeFirst();
     if (!r.numDeletedRows) throw badRequest('No se puede quitar: ya entró a la clase (deshaz la entrada primero)');
     res.json({ ok: true });
@@ -362,14 +378,23 @@ export async function pasarAClase(
   const c = await cargarClase(claseId);
   if (c.estado === 'cancelada') throw badRequest('La clase está cancelada');
   if (c.dia !== hoy()) throw badRequest(`La entrada se da el día de la clase (${c.dia.split('-').reverse().join('/')})`);
-  const ins = await db.selectFrom('claseInscritos').select(['id', 'asistioEn']).where('claseId', '=', c.id).where('socioId', '=', socioId).executeTakeFirst();
+  const ins = await db.selectFrom('claseInscritos').select(['id', 'asistioEn', 'ventaId']).where('claseId', '=', c.id).where('socioId', '=', socioId).executeTakeFirst();
   if (!ins) throw notFound('No está inscrito en esta clase');
   if (ins.asistioEn) throw conflict('Ya entró a esta clase');
   const cob = (await coberturas([socioId], c.planId, c.dia)).get(socioId)!;
-  const cobertura = cob.acceso === 'plan' ? 'plan' : cob.acceso === 'mensualidad' ? 'mensualidad' : por.entrenadorId ? undefined : b.cobertura;
+  const conPrecio = Number(c.precio ?? 0) > 0;
+  // Pagó la clase en caja → "pagó su pase" con su ticket (también lo puede dejar pasar el entrenador)
+  const cobertura = cob.acceso === 'plan' ? 'plan' : cob.acceso === 'mensualidad' ? 'mensualidad' : ins.ventaId ? 'pase' : por.entrenadorId ? undefined : b.cobertura;
   if (!cobertura) {
-    throw badRequest(por.entrenadorId ? 'No tiene mensualidad vigente: que pase por recepción a pagar su pase' : 'No tiene mensualidad: indica si pagó su pase o si lo dejas pasar como cortesía');
+    throw badRequest(
+      por.entrenadorId
+        ? `No tiene mensualidad ni pagó la clase: que pase por recepción${conPrecio ? ' a pagarla' : ''}`
+        : conPrecio
+          ? 'No tiene mensualidad: cóbrale la clase en caja o déjalo pasar como cortesía'
+          : 'No tiene mensualidad: indica si pagó su pase o si lo dejas pasar como cortesía',
+    );
   }
+  if (cobertura === 'pase' && !ins.ventaId && conPrecio) throw badRequest('Esta clase tiene precio: cóbrasela en caja (Cobrar › Clases) y así queda con su ticket');
   const socio = await db.selectFrom('socios').select(['codigo']).where('id', '=', socioId).executeTakeFirstOrThrow();
   // Si ya entró al gym hace poco (lector o recepción), se usa esa entrada
   const reciente = await db

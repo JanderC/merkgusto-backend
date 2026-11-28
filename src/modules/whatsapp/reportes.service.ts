@@ -63,6 +63,7 @@ export async function textoReporteDiario(fecha: string) {
     `   Planes: ${r.ventas.membresias.cantidad} · ${f(r.ventas.membresias.monto)}`,
     `   Productos: ${r.ventas.productos.cantidad} und · ${f(r.ventas.productos.monto)}`,
     ...(r.ventas.personalizados.cantidad ? [`   Personalizados: ${r.ventas.personalizados.cantidad} · ${f(r.ventas.personalizados.monto)}`] : []),
+    ...(r.ventas.clases.cantidad ? [`   Clases: ${r.ventas.clases.cantidad} · ${f(r.ventas.clases.monto)}`] : []),
     r.ventas.abonos.cantidad ? `   Abonos a deudas: ${f(r.ventas.abonos.monto)}` : null,
     r.ventas.fiado > 0 ? `   📒 Quedó fiado: ${f(r.ventas.fiado)}` : null,
     '',
